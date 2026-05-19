@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,23 @@ func fixtureRun(name string) string {
 
 func fixtureOutputs(name string) string {
 	return filepath.Join(fixtureRun(name), "outputs")
+}
+
+func runCLI(t *testing.T, args ...string) (string, string) {
+	t.Helper()
+	stdout, stderr, err := runCLIError(t, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stdout, stderr
+}
+
+func runCLIError(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run(args, &stdout, &stderr)
+	return stdout.String(), stderr.String(), err
 }
 
 func TestAnalyzeRunFromFixture(t *testing.T) {
@@ -119,6 +137,21 @@ func TestRunIdentifierIgnoresTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestParseParamOutNMLRequiresDTOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "param.out.nml")
+	if err := os.WriteFile(path, []byte("&CORE\n DT= 900,\n /\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dt, err := parseParamOutNML(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dt != 900 {
+		t.Fatalf("dt = %d", dt)
+	}
+}
+
 func TestAnalyzeRunSkipsIncompleteTimingFile(t *testing.T) {
 	_, err := analyzeRun(fixtureRun("20110601.00"))
 	if !errors.Is(err, errNoTimingSamples) {
@@ -127,151 +160,105 @@ func TestAnalyzeRunSkipsIncompleteTimingFile(t *testing.T) {
 }
 
 func TestRunWritesCSVAndWarnsForIncompleteInputs(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
 	incompleteRun := fixtureRun("20110601.00")
 	completeRun := fixtureRun("20110602.00")
 
-	err := run(
-		[]string{"--csv", "--workers", "2", "--report-skipped", incompleteRun, completeRun},
-		&stdout,
-		&stderr,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	stdout, stderr := runCLI(t, "--csv", "--workers", "2", "--report-skipped", incompleteRun, completeRun)
 
-	if !strings.Contains(stderr.String(), "warning: skipping "+incompleteRun) {
-		t.Fatalf("missing warning, stderr:\n%s", stderr.String())
+	if !strings.Contains(stderr, "warning: skipping "+incompleteRun) {
+		t.Fatalf("missing warning, stderr:\n%s", stderr)
 	}
-	if !strings.Contains(stdout.String(), "identifier,ranks,elements,nodes,layers,tracers,dt,rnday") {
-		t.Fatalf("missing CSV header, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "identifier,ranks,elements,nodes,layers,tracers,dt,rnday") {
+		t.Fatalf("missing CSV header, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
-		t.Fatalf("missing analyzed row, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
+		t.Fatalf("missing analyzed row, stdout:\n%s", stdout)
 	}
 }
 
 func TestRunWritesGroupedTable(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{fixtureRun("20110602.00")}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, fixtureRun("20110602.00"))
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
+	if !strings.Contains(stdout, "identifier      | ranks") {
+		t.Fatalf("missing identifier separator, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "identifier      | ranks") {
-		t.Fatalf("missing identifier separator, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "tracers |  dt") {
+		t.Fatalf("missing mesh/config separator, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "tracers |  dt") {
-		t.Fatalf("missing mesh/config separator, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "rnday | force_prep") {
+		t.Fatalf("missing config/timing separator, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "rnday | force_prep") {
-		t.Fatalf("missing config/timing separator, stdout:\n%s", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "steps_total |") {
-		t.Fatalf("missing timing/duration separator, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "steps_total |") {
+		t.Fatalf("missing timing/duration separator, stdout:\n%s", stdout)
 	}
 }
 
 func TestRunSkipsIncompleteInputsQuietlyByDefault(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	stdout, stderr := runCLI(t, "--csv", fixtureRun("20110601.00"), fixtureRun("20110602.00"))
 
-	err := run(
-		[]string{"--csv", fixtureRun("20110601.00"), fixtureRun("20110602.00")},
-		&stdout,
-		&stderr,
-	)
-	if err != nil {
-		t.Fatal(err)
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
-		t.Fatalf("missing analyzed row, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
+		t.Fatalf("missing analyzed row, stdout:\n%s", stdout)
 	}
 }
 
 func TestRunWritesJSON(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{"--json", fixtureRun("20110602.00")}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, "--json", fixtureRun("20110602.00"))
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
+	if !strings.Contains(stdout, `"identifier": "a3d/20110602.00"`) {
+		t.Fatalf("missing identifier, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), `"identifier": "a3d/20110602.00"`) {
-		t.Fatalf("missing identifier, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, `"dt": 900`) {
+		t.Fatalf("missing integer dt, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), `"dt": 900`) {
-		t.Fatalf("missing integer dt, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, `"ranks": 3`) {
+		t.Fatalf("missing ranks, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), `"ranks": 3`) {
-		t.Fatalf("missing ranks, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, `"elements": 5839`) {
+		t.Fatalf("missing elements, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), `"elements": 5839`) {
-		t.Fatalf("missing elements, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, `"nodes": 3140`) {
+		t.Fatalf("missing nodes, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), `"nodes": 3140`) {
-		t.Fatalf("missing nodes, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, `"layers": 49`) {
+		t.Fatalf("missing layers, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), `"layers": 49`) {
-		t.Fatalf("missing layers, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, `"tracers": 2`) {
+		t.Fatalf("missing tracers, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), `"tracers": 2`) {
-		t.Fatalf("missing tracers, stdout:\n%s", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), `"force_prep": 0.06666666666666667`) {
-		t.Fatalf("missing full precision force_prep, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, `"force_prep": 0.06666666666666667`) {
+		t.Fatalf("missing full precision force_prep, stdout:\n%s", stdout)
 	}
 }
 
 func TestRunParsesOutputFlagsAfterPositionalArgs(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{fixtureRun("20110602.00"), "--csv"}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, fixtureRun("20110602.00"), "--csv")
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "identifier,ranks,elements,nodes,layers,tracers,dt,rnday") {
-		t.Fatalf("missing CSV header, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "identifier,ranks,elements,nodes,layers,tracers,dt,rnday") {
+		t.Fatalf("missing CSV header, stdout:\n%s", stdout)
 	}
 }
 
 func TestRunParsesSortFlagAfterPositionalArgs(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{fixtureRun("20110602.00"), "--csv", "--sort", "-duration,identifier"}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, fixtureRun("20110602.00"), "--csv", "--sort", "-duration,identifier")
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
-		t.Fatalf("missing analyzed row, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
+		t.Fatalf("missing analyzed row, stdout:\n%s", stdout)
 	}
 }
 
 func TestRunRejectsMultipleOutputFormats(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{"--csv", "--json", fixtureRun("20110602.00")}, &stdout, &stderr)
+	_, _, err := runCLIError(t, "--csv", "--json", fixtureRun("20110602.00"))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -281,10 +268,7 @@ func TestRunRejectsMultipleOutputFormats(t *testing.T) {
 }
 
 func TestRunRejectsMultipleOutputFormatsAfterPositionalArgs(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{fixtureRun("20110602.00"), "--csv", "--json"}, &stdout, &stderr)
+	_, _, err := runCLIError(t, fixtureRun("20110602.00"), "--csv", "--json")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -293,76 +277,71 @@ func TestRunRejectsMultipleOutputFormatsAfterPositionalArgs(t *testing.T) {
 	}
 }
 
-func TestSortRowsByIdentifier(t *testing.T) {
-	rows := []runTiming{
-		{Identifier: "b", Duration: 1},
-		{Identifier: "a", Duration: 2},
-	}
-	keys, err := parseSortKeys("identifier")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sortRows(rows, keys)
-
-	if rows[0].Identifier != "a" || rows[1].Identifier != "b" {
-		t.Fatalf("unexpected order: %s, %s", rows[0].Identifier, rows[1].Identifier)
-	}
-}
-
-func TestSortRowsByDescendingDuration(t *testing.T) {
-	rows := []runTiming{
-		{Identifier: "a", Duration: 1},
-		{Identifier: "b", Duration: 2},
-	}
-	keys, err := parseSortKeys("-duration")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sortRows(rows, keys)
-
-	if rows[0].Identifier != "b" || rows[1].Identifier != "a" {
-		t.Fatalf("unexpected order: %s, %s", rows[0].Identifier, rows[1].Identifier)
-	}
-}
-
-func TestSortRowsByMultipleKeys(t *testing.T) {
-	rows := []runTiming{
-		{Identifier: "a", Ranks: 2, Duration: 1},
-		{Identifier: "b", Ranks: 1, Duration: 1},
-		{Identifier: "c", Ranks: 1, Duration: 3},
-	}
-	keys, err := parseSortKeys("ranks,-duration,identifier")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sortRows(rows, keys)
-
-	got := []string{rows[0].Identifier, rows[1].Identifier, rows[2].Identifier}
-	want := []string{"c", "b", "a"}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("unexpected order: got %v, want %v", got, want)
-		}
-	}
-}
-
-func TestSortRowsByNodes(t *testing.T) {
-	rows := []runTiming{
-		{Identifier: "a", Nodes: 20},
-		{Identifier: "b", Nodes: 10},
-	}
-	keys, err := parseSortKeys("nodes")
-	if err != nil {
-		t.Fatal(err)
+func TestSortRows(t *testing.T) {
+	tests := []struct {
+		name string
+		spec string
+		rows []runTiming
+		want []string
+	}{
+		{
+			name: "identifier",
+			spec: "identifier",
+			rows: []runTiming{
+				{Identifier: "b", Duration: 1},
+				{Identifier: "a", Duration: 2},
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			name: "descending duration",
+			spec: "-duration",
+			rows: []runTiming{
+				{Identifier: "a", Duration: 1},
+				{Identifier: "b", Duration: 2},
+			},
+			want: []string{"b", "a"},
+		},
+		{
+			name: "multiple keys",
+			spec: "ranks,-duration,identifier",
+			rows: []runTiming{
+				{Identifier: "a", Ranks: 2, Duration: 1},
+				{Identifier: "b", Ranks: 1, Duration: 1},
+				{Identifier: "c", Ranks: 1, Duration: 3},
+			},
+			want: []string{"c", "b", "a"},
+		},
+		{
+			name: "nodes",
+			spec: "nodes",
+			rows: []runTiming{
+				{Identifier: "a", Nodes: 20},
+				{Identifier: "b", Nodes: 10},
+			},
+			want: []string{"b", "a"},
+		},
 	}
 
-	sortRows(rows, keys)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			keys, err := parseSortKeys(test.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	if rows[0].Identifier != "b" || rows[1].Identifier != "a" {
-		t.Fatalf("unexpected order: %s, %s", rows[0].Identifier, rows[1].Identifier)
+			sortRows(test.rows, keys)
+
+			got := make([]string, len(test.rows))
+			for index, row := range test.rows {
+				got[index] = row.Identifier
+			}
+			for index := range test.want {
+				if got[index] != test.want[index] {
+					t.Fatalf("unexpected order: got %v, want %v", got, test.want)
+				}
+			}
+		})
 	}
 }
 
@@ -380,10 +359,7 @@ func TestParseSortKeysRejectsUnknownColumns(t *testing.T) {
 }
 
 func TestRunFailsWhenNoInputsCanBeAnalyzed(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{fixtureRun("20110601.00")}, &stdout, &stderr)
+	_, _, err := runCLIError(t, fixtureRun("20110601.00"))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -393,81 +369,57 @@ func TestRunFailsWhenNoInputsCanBeAnalyzed(t *testing.T) {
 }
 
 func TestRunWritesHelpToStdout(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{"--help"}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, "--help")
+	if !strings.Contains(stdout, "Usage: schism-timings [OPTIONS] DIR [DIR...]") {
+		t.Fatalf("missing usage, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "Usage: schism-timings [OPTIONS] DIR [DIR...]") {
-		t.Fatalf("missing usage, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "--workers int") {
+		t.Fatalf("missing workers option, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "--workers int") {
-		t.Fatalf("missing workers option, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "--csv") {
+		t.Fatalf("missing csv option, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "--csv") {
-		t.Fatalf("missing csv option, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "--json") {
+		t.Fatalf("missing json option, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "--json") {
-		t.Fatalf("missing json option, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "--sort columns") {
+		t.Fatalf("missing sort option, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "--sort columns") {
-		t.Fatalf("missing sort option, stdout:\n%s", stdout.String())
+	if !strings.Contains(stdout, "--report-skipped") {
+		t.Fatalf("missing report-skipped option, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "--report-skipped") {
-		t.Fatalf("missing report-skipped option, stdout:\n%s", stdout.String())
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
 }
 
 func TestRunWritesHelpToStdoutAfterPositionalArgs(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{fixtureRun("20110602.00"), "--help"}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, fixtureRun("20110602.00"), "--help")
+	if !strings.Contains(stdout, "Usage: schism-timings [OPTIONS] DIR [DIR...]") {
+		t.Fatalf("missing usage, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout.String(), "Usage: schism-timings [OPTIONS] DIR [DIR...]") {
-		t.Fatalf("missing usage, stdout:\n%s", stdout.String())
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
 }
 
 func TestRunWritesVersion(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{"--version"}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, "--version")
+	if stdout != "schism-timings dev\n" {
+		t.Fatalf("stdout = %q", stdout)
 	}
-	if stdout.String() != "schism-timings dev\n" {
-		t.Fatalf("stdout = %q", stdout.String())
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
 }
 
 func TestRunWritesVersionAfterPositionalArgs(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	err := run([]string{fixtureRun("20110602.00"), "--version"}, &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
+	stdout, stderr := runCLI(t, fixtureRun("20110602.00"), "--version")
+	if stdout != "schism-timings dev\n" {
+		t.Fatalf("stdout = %q", stdout)
 	}
-	if stdout.String() != "schism-timings dev\n" {
-		t.Fatalf("stdout = %q", stdout.String())
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got:\n%s", stderr.String())
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
 }
 

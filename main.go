@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -9,7 +11,7 @@ import (
 	"math"
 	"os"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +45,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	writeUsage := func(format string, args ...any) {
 		_, _ = fmt.Fprintf(fs.Output(), format, args...)
 	}
+	// Keep this in sync with the flag definitions above; pflag.PrintDefaults
+	// does not match the compact layout used by this CLI.
 	fs.Usage = func() {
 		writeUsage("Usage: %s [OPTIONS] DIR [DIR...]\n\n", appName)
 		writeUsage("Print SCHISM timing summaries for run directories.\n")
@@ -129,6 +133,105 @@ type runResult struct {
 	err  error
 }
 
+type resultColumn struct {
+	name        string
+	stringValue func(runTiming) string
+	compare     func(runTiming, runTiming) int
+	jsonValue   func(runTiming) any
+	groupHead   bool
+}
+
+var resultColumnDefs = buildResultColumns()
+var resultColumns = resultColumnNames(resultColumnDefs)
+var resultColumnsByName = resultColumnLookup(resultColumnDefs)
+
+func buildResultColumns() []resultColumn {
+	columns := []resultColumn{
+		stringColumn("identifier", func(row runTiming) string { return row.Identifier }, false),
+		intColumn("ranks", func(row runTiming) int { return row.Ranks }, true),
+		intColumn("elements", func(row runTiming) int { return row.Elements }, false),
+		intColumn("nodes", func(row runTiming) int { return row.Nodes }, false),
+		intColumn("layers", func(row runTiming) int { return row.Layers }, false),
+		intColumn("tracers", func(row runTiming) int { return row.Tracers }, false),
+		intColumn("dt", func(row runTiming) int { return row.DT }, true),
+		floatColumn("rnday", func(row runTiming) float64 { return row.Rnday }, false),
+	}
+	for index, name := range timingColumns {
+		index := index
+		columns = append(columns, floatColumn(name, func(row runTiming) float64 {
+			return row.Timings[index]
+		}, index == 0))
+	}
+	columns = append(columns,
+		floatColumn("steps_total", func(row runTiming) float64 { return row.StepsTotal }, false),
+		floatColumn("init", func(row runTiming) float64 { return row.InitDuration }, true),
+		floatColumn("duration", func(row runTiming) float64 { return row.Duration }, false),
+	)
+	return columns
+}
+
+func stringColumn(name string, value func(runTiming) string, groupHead bool) resultColumn {
+	return resultColumn{
+		name:        name,
+		stringValue: value,
+		compare: func(left runTiming, right runTiming) int {
+			return strings.Compare(value(left), value(right))
+		},
+		jsonValue: func(row runTiming) any {
+			return value(row)
+		},
+		groupHead: groupHead,
+	}
+}
+
+func intColumn(name string, value func(runTiming) int, groupHead bool) resultColumn {
+	return resultColumn{
+		name: name,
+		stringValue: func(row runTiming) string {
+			return strconv.Itoa(value(row))
+		},
+		compare: func(left runTiming, right runTiming) int {
+			return cmp.Compare(value(left), value(right))
+		},
+		jsonValue: func(row runTiming) any {
+			return value(row)
+		},
+		groupHead: groupHead,
+	}
+}
+
+func floatColumn(name string, value func(runTiming) float64, groupHead bool) resultColumn {
+	return resultColumn{
+		name: name,
+		stringValue: func(row runTiming) string {
+			return formatFloat(value(row))
+		},
+		compare: func(left runTiming, right runTiming) int {
+			return compareFloats(value(left), value(right))
+		},
+		jsonValue: func(row runTiming) any {
+			return value(row)
+		},
+		groupHead: groupHead,
+	}
+}
+
+func resultColumnNames(columns []resultColumn) []string {
+	names := make([]string, len(columns))
+	for index, column := range columns {
+		names[index] = column.name
+	}
+	return names
+}
+
+func resultColumnLookup(columns []resultColumn) map[string]resultColumn {
+	lookup := make(map[string]resultColumn, len(columns))
+	for _, column := range columns {
+		lookup[column.name] = column
+	}
+	return lookup
+}
+
 func analyzeRuns(paths []string, workers int) []runResult {
 	if len(paths) == 0 {
 		return nil
@@ -200,7 +303,7 @@ func parseSortKey(spec string) (sortKey, error) {
 		spec = strings.TrimSpace(spec[1:])
 	}
 
-	if !isResultColumn(spec) {
+	if _, ok := resultColumnsByName[spec]; !ok {
 		return sortKey{}, fmt.Errorf("invalid sort column %q; valid columns: %s", spec, strings.Join(resultColumns, ", "))
 	}
 
@@ -208,82 +311,28 @@ func parseSortKey(spec string) (sortKey, error) {
 	return key, nil
 }
 
-func isResultColumn(column string) bool {
-	for _, resultColumn := range resultColumns {
-		if column == resultColumn {
-			return true
-		}
-	}
-	return false
-}
-
 func sortRows(rows []runTiming, keys []sortKey) {
-	sort.SliceStable(rows, func(i, j int) bool {
+	slices.SortStableFunc(rows, func(left runTiming, right runTiming) int {
 		for _, key := range keys {
-			result := compareRows(rows[i], rows[j], key.column)
+			result := compareRows(left, right, key.column)
 			if result == 0 {
 				continue
 			}
 			if key.descending {
-				return result > 0
+				return -result
 			}
-			return result < 0
+			return result
 		}
-		return false
+		return 0
 	})
 }
 
 func compareRows(left runTiming, right runTiming, column string) int {
-	switch column {
-	case "identifier":
-		return strings.Compare(left.Identifier, right.Identifier)
-	case "ranks":
-		return compareInts(left.Ranks, right.Ranks)
-	case "elements":
-		return compareInts(left.Elements, right.Elements)
-	case "nodes":
-		return compareInts(left.Nodes, right.Nodes)
-	case "layers":
-		return compareInts(left.Layers, right.Layers)
-	case "tracers":
-		return compareInts(left.Tracers, right.Tracers)
-	case "dt":
-		return compareInts(left.DT, right.DT)
-	case "rnday":
-		return compareFloats(left.Rnday, right.Rnday)
-	case "force_prep":
-		return compareFloats(left.Timings[0], right.Timings[0])
-	case "mom_advection":
-		return compareFloats(left.Timings[1], right.Timings[1])
-	case "matrix_prep":
-		return compareFloats(left.Timings[2], right.Timings[2])
-	case "solver":
-		return compareFloats(left.Timings[3], right.Timings[3])
-	case "3D_vel":
-		return compareFloats(left.Timings[4], right.Timings[4])
-	case "transport":
-		return compareFloats(left.Timings[5], right.Timings[5])
-	case "outputs":
-		return compareFloats(left.Timings[6], right.Timings[6])
-	case "steps_total":
-		return compareFloats(left.StepsTotal, right.StepsTotal)
-	case "init":
-		return compareFloats(left.InitDuration, right.InitDuration)
-	case "duration":
-		return compareFloats(left.Duration, right.Duration)
-	default:
+	columnDef, ok := resultColumnsByName[column]
+	if !ok {
 		return 0
 	}
-}
-
-func compareInts(left int, right int) int {
-	if left < right {
-		return -1
-	}
-	if left > right {
-		return 1
-	}
-	return 0
+	return columnDef.compare(left, right)
 }
 
 func compareFloats(left float64, right float64) int {
@@ -296,12 +345,8 @@ func compareFloats(left float64, right float64) int {
 		return 1
 	case rightNaN:
 		return -1
-	case left < right:
-		return -1
-	case left > right:
-		return 1
 	default:
-		return 0
+		return cmp.Compare(left, right)
 	}
 }
 
@@ -342,12 +387,7 @@ func writeTable(writer io.Writer, rows []runTiming) error {
 }
 
 func hasTableGroupSeparatorBefore(columnIndex int) bool {
-	switch resultColumns[columnIndex] {
-	case "ranks", "dt", "force_prep", "init":
-		return true
-	default:
-		return false
-	}
+	return resultColumnDefs[columnIndex].groupHead
 }
 
 func writeCSV(writer io.Writer, rows []runTiming) error {
@@ -370,73 +410,58 @@ func writeJSON(writer io.Writer, rows []runTiming) error {
 	return encoder.Encode(toJSONRows(rows))
 }
 
-type jsonRow struct {
-	Identifier   string  `json:"identifier"`
-	Ranks        int     `json:"ranks"`
-	Elements     int     `json:"elements"`
-	Nodes        int     `json:"nodes"`
-	Layers       int     `json:"layers"`
-	Tracers      int     `json:"tracers"`
-	DT           int     `json:"dt"`
-	Rnday        float64 `json:"rnday"`
-	ForcePrep    float64 `json:"force_prep"`
-	MomAdvection float64 `json:"mom_advection"`
-	MatrixPrep   float64 `json:"matrix_prep"`
-	Solver       float64 `json:"solver"`
-	Velocity3D   float64 `json:"3D_vel"`
-	Transport    float64 `json:"transport"`
-	Outputs      float64 `json:"outputs"`
-	StepsTotal   float64 `json:"steps_total"`
-	Init         float64 `json:"init"`
-	Duration     float64 `json:"duration"`
+type jsonField struct {
+	name  string
+	value any
+}
+
+type jsonRow []jsonField
+
+func (row jsonRow) MarshalJSON() ([]byte, error) {
+	var buffer bytes.Buffer
+	buffer.WriteByte('{')
+	for index, field := range row {
+		if index > 0 {
+			buffer.WriteByte(',')
+		}
+
+		name, err := json.Marshal(field.name)
+		if err != nil {
+			return nil, err
+		}
+		value, err := json.Marshal(field.value)
+		if err != nil {
+			return nil, err
+		}
+
+		buffer.Write(name)
+		buffer.WriteByte(':')
+		buffer.Write(value)
+	}
+	buffer.WriteByte('}')
+	return buffer.Bytes(), nil
 }
 
 func toJSONRows(rows []runTiming) []jsonRow {
 	jsonRows := make([]jsonRow, 0, len(rows))
 	for _, row := range rows {
-		jsonRows = append(jsonRows, jsonRow{
-			Identifier:   row.Identifier,
-			Ranks:        row.Ranks,
-			Elements:     row.Elements,
-			Nodes:        row.Nodes,
-			Layers:       row.Layers,
-			Tracers:      row.Tracers,
-			DT:           row.DT,
-			Rnday:        row.Rnday,
-			ForcePrep:    row.Timings[0],
-			MomAdvection: row.Timings[1],
-			MatrixPrep:   row.Timings[2],
-			Solver:       row.Timings[3],
-			Velocity3D:   row.Timings[4],
-			Transport:    row.Timings[5],
-			Outputs:      row.Timings[6],
-			StepsTotal:   row.StepsTotal,
-			Init:         row.InitDuration,
-			Duration:     row.Duration,
-		})
+		fields := make(jsonRow, len(resultColumnDefs))
+		for index, column := range resultColumnDefs {
+			fields[index] = jsonField{
+				name:  column.name,
+				value: column.jsonValue(row),
+			}
+		}
+		jsonRows = append(jsonRows, fields)
 	}
 	return jsonRows
 }
 
 func (row runTiming) asStrings() []string {
-	fields := []string{
-		row.Identifier,
-		strconv.Itoa(row.Ranks),
-		strconv.Itoa(row.Elements),
-		strconv.Itoa(row.Nodes),
-		strconv.Itoa(row.Layers),
-		strconv.Itoa(row.Tracers),
-		strconv.Itoa(row.DT),
-		formatFloat(row.Rnday),
+	fields := make([]string, len(resultColumnDefs))
+	for index, column := range resultColumnDefs {
+		fields[index] = column.stringValue(row)
 	}
-	for _, value := range row.Timings {
-		fields = append(fields, formatFloat(value))
-	}
-	fields = append(fields,
-		formatFloat(row.StepsTotal),
-		formatFloat(row.InitDuration),
-		formatFloat(row.Duration),
-	)
 	return fields
 }
 
@@ -460,20 +485,16 @@ func columnWidths(rows [][]string) []int {
 }
 
 func padLeft(value string, width int) string {
-	if len(value) >= width {
-		return value
-	}
-	return strings.Repeat(" ", width-len(value)) + value
+	return fmt.Sprintf("%*s", width, value)
 }
 
 func padRight(value string, width int) string {
-	if len(value) >= width {
-		return value
-	}
-	return value + strings.Repeat(" ", width-len(value))
+	return fmt.Sprintf("%-*s", width, value)
 }
 
 func hasHelpFlag(args []string) bool {
+	// Scan before fs.Parse so --help still wins when another flag has a bad or
+	// missing value, for example: --workers --help.
 	for _, arg := range args {
 		if arg == "--" {
 			return false

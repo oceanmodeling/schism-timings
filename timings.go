@@ -12,25 +12,9 @@ import (
 	"time"
 )
 
-var timingColumns = []string{
-	"force_prep",
-	"mom_advection",
-	"matrix_prep",
-	"solver",
-	"3D_vel",
-	"transport",
-	"outputs",
-}
+const timingColumnCount = 7
 
-var resultColumns = []string{
-	"identifier",
-	"ranks",
-	"elements",
-	"nodes",
-	"layers",
-	"tracers",
-	"dt",
-	"rnday",
+var timingColumns = [timingColumnCount]string{
 	"force_prep",
 	"mom_advection",
 	"matrix_prep",
@@ -38,12 +22,11 @@ var resultColumns = []string{
 	"3D_vel",
 	"transport",
 	"outputs",
-	"steps_total",
-	"init",
-	"duration",
 }
 
 var errNoTimingSamples = errors.New("no complete timing samples")
+
+const maxScannerTokenSize = 1024 * 1024
 
 type runTiming struct {
 	Identifier   string
@@ -54,7 +37,7 @@ type runTiming struct {
 	Tracers      int
 	DT           int
 	Rnday        float64
-	Timings      [7]float64
+	Timings      [timingColumnCount]float64
 	StepsTotal   float64
 	InitDuration float64
 	Duration     float64
@@ -74,7 +57,7 @@ func analyzeRun(path string) (runTiming, error) {
 		return runTiming{}, fmt.Errorf("%s: %w", path, err)
 	}
 
-	_, dt, err := parseParamOutNML(layout.ParamNML)
+	dt, err := parseParamOutNML(layout.ParamNML)
 	if err != nil {
 		return runTiming{}, fmt.Errorf("%s: parse param.out.nml: %w", path, err)
 	}
@@ -93,7 +76,7 @@ func analyzeRun(path string) (runTiming, error) {
 		return runTiming{}, fmt.Errorf("%s: read mesh metadata: %w", path, err)
 	}
 
-	var sums [7]float64
+	var sums [timingColumnCount]float64
 	for _, row := range stats {
 		for i, value := range row {
 			sums[i] += value
@@ -105,7 +88,7 @@ func analyzeRun(path string) (runTiming, error) {
 		return runTiming{}, fmt.Errorf("%s: non-positive analyzed RNDAY %.12g", path, rnday)
 	}
 
-	var timings [7]float64
+	var timings [timingColumnCount]float64
 	var stepsTotalSec float64
 	var stepsTotalPerRnday float64
 	for i, value := range sums {
@@ -181,47 +164,35 @@ func runIdentifier(runDir string) string {
 	return filepath.ToSlash(filepath.Join(parent, base))
 }
 
-func parseParamOutNML(path string) (float64, int, error) {
+func parseParamOutNML(path string) (int, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	defer func() { _ = file.Close() }()
 
-	var rnday float64
 	var dt int
-	var haveRnday, haveDT bool
+	var haveDT bool
 
-	scanner := bufio.NewScanner(file)
+	scanner := newScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		switch {
-		case strings.HasPrefix(line, "RNDAY="):
-			value, err := parseNMLFloat(line)
-			if err != nil {
-				return 0, 0, fmt.Errorf("RNDAY: %w", err)
-			}
-			rnday = value
-			haveRnday = true
-		case strings.HasPrefix(line, "DT="):
+		if strings.HasPrefix(line, "DT=") {
 			value, err := parseNMLInt(line)
 			if err != nil {
-				return 0, 0, fmt.Errorf("DT: %w", err)
+				return 0, fmt.Errorf("DT: %w", err)
 			}
 			dt = value
 			haveDT = true
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return 0, 0, err
-	}
-	if !haveRnday {
-		return 0, 0, errors.New("RNDAY not found")
+		return 0, err
 	}
 	if !haveDT {
-		return 0, 0, errors.New("DT not found")
+		return 0, errors.New("DT not found")
 	}
-	return rnday, dt, nil
+	return dt, nil
 }
 
 func parseNMLInt(line string) (int, error) {
@@ -250,7 +221,7 @@ func parseNMLFloat(line string) (float64, error) {
 	return strconv.ParseFloat(strings.TrimSpace(value), 64)
 }
 
-func parseNonFatal(path string) ([][7]float64, error) {
+func parseNonFatal(path string) ([][timingColumnCount]float64, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -259,7 +230,7 @@ func parseNonFatal(path string) ([][7]float64, error) {
 
 	var values []float64
 	lineNumber := 0
-	scanner := bufio.NewScanner(file)
+	scanner := newScanner(file)
 	for scanner.Scan() {
 		lineNumber++
 		if lineNumber <= 2 {
@@ -285,9 +256,9 @@ func parseNonFatal(path string) ([][7]float64, error) {
 	}
 
 	values = values[:len(values)/len(timingColumns)*len(timingColumns)]
-	rows := make([][7]float64, 0, len(values)/len(timingColumns))
+	rows := make([][timingColumnCount]float64, 0, len(values)/len(timingColumns))
 	for i := 0; i < len(values); i += len(timingColumns) {
-		var row [7]float64
+		var row [timingColumnCount]float64
 		copy(row[:], values[i:i+len(timingColumns)])
 		rows = append(rows, row)
 	}
@@ -301,7 +272,7 @@ func parseMirrorDuration(path string) (float64, bool) {
 	}
 	defer func() { _ = file.Close() }()
 
-	scanner := bufio.NewScanner(file)
+	scanner := newScanner(file)
 	var first, last string
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -352,7 +323,7 @@ func readMeshInfo(outputs string) (meshInfo, error) {
 	}
 	defer func() { _ = file.Close() }()
 
-	scanner := bufio.NewScanner(file)
+	scanner := newScanner(file)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
 			return meshInfo{}, err
@@ -393,6 +364,12 @@ func readMeshInfo(outputs string) (meshInfo, error) {
 		Layers:   layers,
 		Tracers:  tracers,
 	}, nil
+}
+
+func newScanner(file *os.File) *bufio.Scanner {
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), maxScannerTokenSize)
+	return scanner
 }
 
 func parsePositiveField(fields []string, index int, name string) (int, error) {
