@@ -1,0 +1,45 @@
+# If you prefer the allow list template instead of the deny list, see:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Project build outputs
+/schism-timings
+/schism-timings-linux-amd64
+/schism-timings-linux-amd64.sha256
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+/coverage.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# SCHISM fixtures use .out filenames.
+!testdata/**/*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Local editor and OS files
+.DS_Store
+*.swp
+
+# Editor/IDE
+# .idea/
+# .vscode/
