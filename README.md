@@ -2,6 +2,19 @@
 
 Command-line tool for printing SCHISM timing summaries for run directories.
 
+## Install From GitHub Releases
+
+Download the latest linux-amd64 executable:
+
+```sh
+curl -L -o schism-timings https://github.com/seareport/schism_timings/releases/latest/download/schism-timings-linux-amd64
+chmod +x schism-timings
+./schism-timings --version
+```
+
+For reproducible installs, replace `latest` with a specific release tag such as
+`v0.1.0`.
+
 ## Development
 
 This project uses `pre-commit` to run the standard Go checks before commits:
@@ -43,16 +56,3 @@ EXEC := $(EXEC)_TIMER2
 `INCLUDE_TIMING` / `USE_TIMER` is separate SCHISM instrumentation and does not
 produce the `nonfatal_000000` timing lines parsed by this CLI.
 
-## Install From GitHub Releases
-
-Release tags use semantic versions, for example `v0.1.0`.
-
-Download the linux-amd64 executable:
-
-```sh
-curl -L -o schism-timings https://github.com/OWNER/REPO/releases/download/v0.1.0/schism-timings-linux-amd64
-chmod +x schism-timings
-./schism-timings --version
-```
-
-Replace `OWNER/REPO` with the GitHub repository path and `v0.1.0` with the release tag to install.
