@@ -1,6 +1,6 @@
 BINARY := schism-timings
 LINUX_AMD64_BINARY := schism-timings-linux-amd64
-VERSION ?= dev
+VERSION ?= $(shell git describe --tags --dirty --always --long)
 
 .PHONY: all build build-linux-amd64 test clean
 
