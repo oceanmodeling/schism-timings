@@ -37,6 +37,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 
 	csvOutput := fs.Bool("csv", false, "write CSV output")
 	jsonOutput := fs.Bool("json", false, "write JSON output")
+	columnsSpec := fs.String("columns", "", "comma-separated output columns (default all columns)")
 	sortSpec := fs.String("sort", "identifier", "comma-separated sort columns; prefix with - for descending")
 	workers := fs.Int("workers", defaultWorkers(), "number of run directories to analyze concurrently")
 	reportSkipped := fs.Bool("report-skipped", false, "report input directories that cannot be analyzed")
@@ -55,6 +56,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 		writeUsage("    \twrite CSV output\n")
 		writeUsage("  --json\n")
 		writeUsage("    \twrite JSON output\n")
+		writeUsage("  --columns columns\n")
+		writeUsage("    \tcomma-separated output columns (default all columns)\n")
 		writeUsage("  --sort columns\n")
 		writeUsage("    \tcomma-separated sort columns; prefix with - for descending (default \"identifier\")\n")
 		writeUsage("  --workers int\n")
@@ -97,6 +100,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	outputColumns, err := parseOutputColumns(*columnsSpec)
+	if err != nil {
+		return err
+	}
 
 	var rows []runTiming
 	for _, result := range analyzeRuns(fs.Args(), *workers) {
@@ -119,11 +126,11 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 
 	switch {
 	case *csvOutput:
-		return writeCSV(stdout, rows)
+		return writeCSV(stdout, rows, outputColumns)
 	case *jsonOutput:
-		return writeJSON(stdout, rows)
+		return writeJSON(stdout, rows, outputColumns)
 	default:
-		return writeTable(stdout, rows)
+		return writeTable(stdout, rows, outputColumns)
 	}
 }
 
@@ -234,6 +241,28 @@ func resultColumnLookup(columns []resultColumn) map[string]resultColumn {
 		lookup[column.name] = column
 	}
 	return lookup
+}
+
+func parseOutputColumns(spec string) ([]resultColumn, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return resultColumnDefs, nil
+	}
+
+	parts := strings.Split(spec, ",")
+	columns := make([]resultColumn, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return nil, fmt.Errorf("empty output column; valid columns: %s", strings.Join(resultColumns, ", "))
+		}
+		column, ok := resultColumnsByName[name]
+		if !ok {
+			return nil, fmt.Errorf("invalid output column %q; valid columns: %s", name, strings.Join(resultColumns, ", "))
+		}
+		columns = append(columns, column)
+	}
+	return columns, nil
 }
 
 func analyzeRuns(paths []string, workers int) []runResult {
@@ -354,11 +383,11 @@ func compareFloats(left float64, right float64) int {
 	}
 }
 
-func writeTable(writer io.Writer, rows []runTiming) error {
+func writeTable(writer io.Writer, rows []runTiming, columns []resultColumn) error {
 	tableRows := make([][]string, 0, len(rows)+1)
-	tableRows = append(tableRows, resultColumns)
+	tableRows = append(tableRows, resultColumnNames(columns))
 	for _, row := range rows {
-		tableRows = append(tableRows, row.asStrings())
+		tableRows = append(tableRows, row.asStrings(columns))
 	}
 
 	widths := columnWidths(tableRows)
@@ -366,7 +395,7 @@ func writeTable(writer io.Writer, rows []runTiming) error {
 		for columnIndex, field := range fields {
 			if columnIndex > 0 {
 				separator := "  "
-				if hasTableGroupSeparatorBefore(columnIndex) {
+				if hasTableGroupSeparatorBefore(columns, columnIndex) {
 					separator = " | "
 				}
 				if _, err := fmt.Fprint(writer, separator); err != nil {
@@ -390,17 +419,17 @@ func writeTable(writer io.Writer, rows []runTiming) error {
 	return nil
 }
 
-func hasTableGroupSeparatorBefore(columnIndex int) bool {
-	return resultColumnDefs[columnIndex].groupHead
+func hasTableGroupSeparatorBefore(columns []resultColumn, columnIndex int) bool {
+	return columns[columnIndex].groupHead
 }
 
-func writeCSV(writer io.Writer, rows []runTiming) error {
+func writeCSV(writer io.Writer, rows []runTiming, columns []resultColumn) error {
 	csvWriter := csv.NewWriter(writer)
-	if err := csvWriter.Write(resultColumns); err != nil {
+	if err := csvWriter.Write(resultColumnNames(columns)); err != nil {
 		return err
 	}
 	for _, row := range rows {
-		if err := csvWriter.Write(row.asStrings()); err != nil {
+		if err := csvWriter.Write(row.asStrings(columns)); err != nil {
 			return err
 		}
 	}
@@ -408,10 +437,10 @@ func writeCSV(writer io.Writer, rows []runTiming) error {
 	return csvWriter.Error()
 }
 
-func writeJSON(writer io.Writer, rows []runTiming) error {
+func writeJSON(writer io.Writer, rows []runTiming, columns []resultColumn) error {
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(toJSONRows(rows))
+	return encoder.Encode(toJSONRows(rows, columns))
 }
 
 type jsonField struct {
@@ -446,11 +475,11 @@ func (row jsonRow) MarshalJSON() ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-func toJSONRows(rows []runTiming) []jsonRow {
+func toJSONRows(rows []runTiming, columns []resultColumn) []jsonRow {
 	jsonRows := make([]jsonRow, 0, len(rows))
 	for _, row := range rows {
-		fields := make(jsonRow, len(resultColumnDefs))
-		for index, column := range resultColumnDefs {
+		fields := make(jsonRow, len(columns))
+		for index, column := range columns {
 			fields[index] = jsonField{
 				name:  column.name,
 				value: column.jsonValue(row),
@@ -461,9 +490,9 @@ func toJSONRows(rows []runTiming) []jsonRow {
 	return jsonRows
 }
 
-func (row runTiming) asStrings() []string {
-	fields := make([]string, len(resultColumnDefs))
-	for index, column := range resultColumnDefs {
+func (row runTiming) asStrings(columns []resultColumn) []string {
+	fields := make([]string, len(columns))
+	for index, column := range columns {
 		fields[index] = column.stringValue(row)
 	}
 	return fields

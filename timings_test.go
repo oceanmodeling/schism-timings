@@ -239,6 +239,52 @@ func TestRunWritesJSON(t *testing.T) {
 	}
 }
 
+func TestRunWritesSelectedCSVColumns(t *testing.T) {
+	stdout, stderr := runCLI(t, "--csv", "--columns", "identifier,outputs", fixtureRun("20110602.00"))
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
+	}
+	want := "identifier,outputs\na3d/20110602.00,0.2267\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunWritesSelectedJSONColumns(t *testing.T) {
+	stdout, stderr := runCLI(t, "--json", "--columns", "identifier,outputs", fixtureRun("20110602.00"))
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("invalid JSON:\n%s\nerror: %v", stdout, err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("len(decoded) = %d", len(decoded))
+	}
+	if len(decoded[0]) != 2 {
+		t.Fatalf("decoded row has %d fields, want 2: %#v", len(decoded[0]), decoded[0])
+	}
+	if decoded[0]["identifier"] != "a3d/20110602.00" {
+		t.Fatalf("identifier = %#v", decoded[0]["identifier"])
+	}
+	assertClose(t, decoded[0]["outputs"].(float64), 34.0/150.0)
+}
+
+func TestRunRejectsUnknownOutputColumn(t *testing.T) {
+	_, _, err := runCLIError(t, "--columns", "identifier,outpts", fixtureRun("20110602.00"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), `invalid output column "outpts"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "outputs") {
+		t.Fatalf("valid columns not included in error: %v", err)
+	}
+}
+
 func TestWriteJSONEncodesNaNAsNull(t *testing.T) {
 	var stdout bytes.Buffer
 	rows := []runTiming{
@@ -248,7 +294,7 @@ func TestWriteJSONEncodesNaNAsNull(t *testing.T) {
 		},
 	}
 
-	if err := writeJSON(&stdout, rows); err != nil {
+	if err := writeJSON(&stdout, rows, resultColumnDefs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -273,6 +319,17 @@ func TestRunParsesOutputFlagsAfterPositionalArgs(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "identifier,ranks,elements,nodes,layers,tracers,dt,rnday") {
 		t.Fatalf("missing CSV header, stdout:\n%s", stdout)
+	}
+}
+
+func TestRunParsesColumnsFlagAfterPositionalArgs(t *testing.T) {
+	stdout, stderr := runCLI(t, fixtureRun("20110602.00"), "--csv", "--columns", "identifier,outputs")
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
+	}
+	want := "identifier,outputs\na3d/20110602.00,0.2267\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
 
@@ -410,6 +467,9 @@ func TestRunWritesHelpToStdout(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "--json") {
 		t.Fatalf("missing json option, stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "--columns columns") {
+		t.Fatalf("missing columns option, stdout:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "--sort columns") {
 		t.Fatalf("missing sort option, stdout:\n%s", stdout)
