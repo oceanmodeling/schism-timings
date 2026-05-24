@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,6 +236,33 @@ func TestRunWritesJSON(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"force_prep": 0.06666666666666667`) {
 		t.Fatalf("missing full precision force_prep, stdout:\n%s", stdout)
+	}
+}
+
+func TestWriteJSONEncodesNaNAsNull(t *testing.T) {
+	var stdout bytes.Buffer
+	rows := []runTiming{
+		{
+			Identifier:   "missing-init",
+			InitDuration: math.NaN(),
+		},
+	}
+
+	if err := writeJSON(&stdout, rows); err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("invalid JSON:\n%s\nerror: %v", stdout.String(), err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("len(decoded) = %d", len(decoded))
+	}
+	if value, ok := decoded[0]["init"]; !ok {
+		t.Fatalf("missing init field, stdout:\n%s", stdout.String())
+	} else if value != nil {
+		t.Fatalf("init = %#v, want nil", value)
 	}
 }
 

@@ -210,7 +210,11 @@ func floatColumn(name string, value func(runTiming) float64, groupHead bool) res
 			return compareFloats(value(left), value(right))
 		},
 		jsonValue: func(row runTiming) any {
-			return value(row)
+			value := value(row)
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return nil
+			}
+			return value
 		},
 		groupHead: groupHead,
 	}
