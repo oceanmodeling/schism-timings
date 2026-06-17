@@ -1,6 +1,7 @@
 # schism-timings
 
-Command-line tool for printing SCHISM timing summaries for run directories.
+Command-line tool for printing SCHISM timing summaries from run directories or
+parent directories that contain them.
 
 ## Install From GitHub Releases
 
@@ -31,6 +32,20 @@ r0403/20200131.00  |  5276  21136211  11078206      33        2 | 120  60.0000 |
 r0403/20200331.00  |  5276  21136211  11078206      33        2 | 120  60.0000 |     0.0570         0.1064       0.0192  0.0398  0.0127     0.3753   0.0431       0.6535 | 0.3384   39.5478
 r0404/20200101.00  |  5276  21136211  11078206      33        2 | 120  16.6333 |     0.0574         0.1088       0.0190  0.0381  0.0126     0.3760   0.0500       0.6618 |     NA  -11.0081
 ```
+
+You can also pass a parent directory and let `schism-timings` discover nested
+SCHISM `outputs` directories:
+
+```sh
+schism-timings /runs/r04 --discover-depth 4
+```
+
+Discovery scans up to four directory levels beneath each `DIR` by default,
+skips hidden directories and `zarr`/`*.zarr` directories, and preserves explicit
+run directory or `outputs` directory inputs. Set `--discover-depth 0` to disable
+recursive discovery. When runs are discovered below a parent directory,
+identifiers are reported relative to that parent, such as
+`r0401/20200101.00`.
 
 Limit output to selected columns:
 
