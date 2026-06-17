@@ -8,7 +8,7 @@ parent directories that contain them.
 Download the latest linux-amd64 executable:
 
 ```sh
-curl -L -o schism-timings https://github.com/seareport/schism_timings/releases/latest/download/schism-timings-linux-amd64
+curl -L -o schism-timings https://github.com/oceanmodeling/schism-timings/releases/latest/download/schism-timings-linux-amd64
 chmod +x schism-timings
 ./schism-timings --version
 ```
