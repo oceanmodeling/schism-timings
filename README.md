@@ -97,13 +97,18 @@ pre-commit run --all-files
 
 ## SCHISM Timing Requirements
 
-`schism-timings` reads the per-step timing lines from `outputs/nonfatal_000000`,
-such as `Time (sec) taken for force prep=` and `Time taken for transport=`.
-In SCHISM, those lines are emitted by the `TIMER2` instrumentation in
-`src/Hydro/schism_step.F90`.
+`schism-timings` reads mesh and configuration metadata from standard SCHISM
+output files. When `outputs/mirror.out` has parseable run start and completion
+timestamps, the tool can also report wall-clock duration without per-step
+timing data.
 
-Build SCHISM with `TIMER2` enabled before analyzing runs with this tool. For a
-CMake build, set:
+Detailed timing columns require the per-step timing lines from
+`outputs/nonfatal_000000`, such as `Time (sec) taken for force prep=` and
+`Time taken for transport=`. In SCHISM, those lines are emitted by the `TIMER2`
+instrumentation in `src/Hydro/schism_step.F90`.
+
+Build SCHISM with `TIMER2` enabled before analyzing detailed timing columns
+with this tool. For a CMake build, set:
 
 ```cmake
 set(TIMER2 ON CACHE BOOLEAN "Print timing information")
@@ -118,3 +123,7 @@ EXEC := $(EXEC)_TIMER2
 
 `INCLUDE_TIMING` / `USE_TIMER` is separate SCHISM instrumentation and does not
 produce the `nonfatal_000000` timing lines parsed by this CLI.
+
+If `TIMER2` data is missing, empty, or incomplete, `schism-timings` still emits
+a partial row when the non-TIMER2 inputs are available. TIMER2-derived columns
+are reported as `NA` in table/CSV output and `null` in JSON output.

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -34,6 +33,33 @@ func runCLIError(t *testing.T, args ...string) (string, string, error) {
 	var stderr bytes.Buffer
 	err := run(args, &stdout, &stderr)
 	return stdout.String(), stderr.String(), err
+}
+
+func tempRun(t *testing.T, name string, extraOutputFiles map[string]string) string {
+	t.Helper()
+	runDir := filepath.Join(t.TempDir(), "a3d", name)
+	outputs := filepath.Join(runDir, "outputs")
+	if err := os.MkdirAll(outputs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	files := map[string]string{
+		"param.out.nml":          "&CORE\n DT= 900.00000000000000,\n /\n",
+		"local_to_global_000000": "8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n",
+	}
+	for name, content := range extraOutputFiles {
+		files[name] = content
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(outputs, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return runDir
+}
+
+func parseableMirrorOut() string {
+	return "Run begins at 20250101, 000000.000\nRun completed successfully at 20250101, 000300.000\n"
 }
 
 func TestAnalyzeRunFromFixture(t *testing.T) {
@@ -105,8 +131,8 @@ func TestAnalyzeRunsPreservesInputOrderWithInvalidWorkerCount(t *testing.T) {
 	if results[1].path != incompleteRun {
 		t.Fatalf("results[1].path = %q", results[1].path)
 	}
-	if !errors.Is(results[1].err, errNoTimingSamples) {
-		t.Fatalf("expected errNoTimingSamples, got %v", results[1].err)
+	if results[1].err == nil || !strings.Contains(results[1].err.Error(), "local_to_global_000000") {
+		t.Fatalf("expected missing local_to_global_000000 error, got %v", results[1].err)
 	}
 }
 
@@ -154,10 +180,203 @@ func TestParseParamOutNMLRequiresDTOnly(t *testing.T) {
 	}
 }
 
-func TestAnalyzeRunSkipsIncompleteTimingFile(t *testing.T) {
+func TestAnalyzeRunRequiresMeshMetadataForPartialRows(t *testing.T) {
 	_, err := analyzeRun(fixtureRun("20110601.00"))
-	if !errors.Is(err, errNoTimingSamples) {
-		t.Fatalf("expected errNoTimingSamples, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "local_to_global_000000") {
+		t.Fatalf("expected missing local_to_global_000000 error, got %v", err)
+	}
+}
+
+func TestAnalyzeRunFallsBackWithoutTimingFile(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": parseableMirrorOut(),
+	})
+
+	row, err := analyzeRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if row.Identifier != "a3d/20110603.00" {
+		t.Fatalf("identifier = %q", row.Identifier)
+	}
+	if row.Ranks != 3 {
+		t.Fatalf("Ranks = %d", row.Ranks)
+	}
+	if row.Elements != 5839 {
+		t.Fatalf("Elements = %d", row.Elements)
+	}
+	if row.Nodes != 3140 {
+		t.Fatalf("Nodes = %d", row.Nodes)
+	}
+	if row.Layers != 49 {
+		t.Fatalf("Layers = %d", row.Layers)
+	}
+	if row.Tracers != 2 {
+		t.Fatalf("Tracers = %d", row.Tracers)
+	}
+	if row.DT != 900 {
+		t.Fatalf("DT = %d", row.DT)
+	}
+	assertNaN(t, row.Rnday)
+	for index, value := range row.Timings {
+		if !math.IsNaN(value) {
+			t.Fatalf("Timings[%d] = %v, want NaN", index, value)
+		}
+	}
+	assertNaN(t, row.StepsTotal)
+	assertNaN(t, row.InitDuration)
+	assertClose(t, row.Duration, 180.0/3600.0)
+}
+
+func TestAnalyzeRunFallsBackWithEmptyTimingFile(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out":      parseableMirrorOut(),
+		"nonfatal_000000": "",
+	})
+
+	row, err := analyzeRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertNaN(t, row.Timings[0])
+	assertNaN(t, row.StepsTotal)
+	assertNaN(t, row.InitDuration)
+	assertClose(t, row.Duration, 180.0/3600.0)
+}
+
+func TestAnalyzeRunFallsBackWithNonTimingNonFatalFile(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out":      parseableMirrorOut(),
+		"nonfatal_000000": "Max. # of Kriging points = 3\nMax. error in inverting Kriging matrix = 0.0\nWarning detail = not-a-timing-value\n",
+	})
+
+	row, err := analyzeRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertNaN(t, row.Timings[0])
+	assertNaN(t, row.StepsTotal)
+	assertNaN(t, row.InitDuration)
+	assertClose(t, row.Duration, 180.0/3600.0)
+}
+
+func TestAnalyzeRunAcceptsSchismMatrixPrepTypo(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": parseableMirrorOut(),
+		"nonfatal_000000": strings.Join([]string{
+			"Time (sec) taken for force prep= 1.0 1",
+			"Time taken for mom advection= 2.0 1",
+			"Time taken for maxtrix prep= 3.0 1",
+			"Time for solver= 4.0 1",
+			"Time taken for 3D vel= 5.0 1",
+			"Time taken for transport= 6.0 1",
+			"Time taken for outputs= 7.0 1",
+			"",
+		}, "\n"),
+	})
+
+	row, err := analyzeRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertClose(t, row.Rnday, 900.0/86400.0)
+	assertClose(t, row.Timings[0], 1.0/(900.0/86400.0)/3600.0)
+	assertClose(t, row.Timings[1], 2.0/(900.0/86400.0)/3600.0)
+	assertClose(t, row.Timings[2], 3.0/(900.0/86400.0)/3600.0)
+	assertClose(t, row.StepsTotal, 28.0/(900.0/86400.0)/3600.0)
+	assertClose(t, row.InitDuration, 152.0/3600.0)
+	assertClose(t, row.Duration, 180.0/3600.0)
+}
+
+func TestAnalyzeRunFallbackLeavesDurationUnavailableWithoutMirror(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", nil)
+
+	row, err := analyzeRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertNaN(t, row.Timings[0])
+	assertNaN(t, row.StepsTotal)
+	assertNaN(t, row.InitDuration)
+	assertNaN(t, row.Duration)
+}
+
+func TestAnalyzeRunFallbackLeavesDurationUnavailableWithUnparseableMirror(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": "run started sometime\nrun ended later\n",
+	})
+
+	row, err := analyzeRun(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertNaN(t, row.Timings[0])
+	assertNaN(t, row.StepsTotal)
+	assertNaN(t, row.InitDuration)
+	assertNaN(t, row.Duration)
+}
+
+func TestRunWritesPartialTableWithoutWarning(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": parseableMirrorOut(),
+	})
+
+	stdout, stderr := runCLI(t, "--report-skipped", "--columns", "identifier,force_prep,steps_total,init,duration", runDir)
+
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "identifier      | force_prep  steps_total | init  duration") {
+		t.Fatalf("missing partial table header, stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "a3d/20110603.00 |         NA           NA |   NA    0.0500") {
+		t.Fatalf("missing partial table row, stdout:\n%s", stdout)
+	}
+}
+
+func TestRunWritesPartialCSVWithoutWarning(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": parseableMirrorOut(),
+	})
+
+	stdout, stderr := runCLI(t, "--csv", "--report-skipped", "--columns", "identifier,force_prep,steps_total,init,duration", runDir)
+
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
+	}
+	want := "identifier,force_prep,steps_total,init,duration\na3d/20110603.00,NA,NA,NA,0.0500\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunWritesPartialJSONNulls(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", nil)
+
+	stdout, stderr := runCLI(t, "--json", "--columns", "identifier,force_prep,steps_total,init,duration", runDir)
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("invalid JSON:\n%s\nerror: %v", stdout, err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("len(decoded) = %d", len(decoded))
+	}
+	for _, column := range []string{"force_prep", "steps_total", "init", "duration"} {
+		if value, ok := decoded[0][column]; !ok {
+			t.Fatalf("missing %s field, stdout:\n%s", column, stdout)
+		} else if value != nil {
+			t.Fatalf("%s = %#v, want nil", column, value)
+		}
 	}
 }
 
@@ -521,5 +740,12 @@ func assertClose(t *testing.T, got float64, want float64) {
 	}
 	if diff > tolerance {
 		t.Fatalf("got %.17g, want %.17g", got, want)
+	}
+}
+
+func assertNaN(t *testing.T, got float64) {
+	t.Helper()
+	if !math.IsNaN(got) {
+		t.Fatalf("got %.17g, want NaN", got)
 	}
 }

@@ -24,7 +24,18 @@ var timingColumns = [timingColumnCount]string{
 	"outputs",
 }
 
-var errNoTimingSamples = errors.New("no complete timing samples")
+var nonFatalTimingPrefixes = [][]string{
+	{"Time (sec) taken for force prep="},
+	{"Time taken for mom advection="},
+	{
+		"Time taken for matrix prep=",
+		"Time taken for maxtrix prep=",
+	},
+	{"Time for solver="},
+	{"Time taken for 3D vel="},
+	{"Time taken for transport="},
+	{"Time taken for outputs="},
+}
 
 const maxScannerTokenSize = 1024 * 1024
 
@@ -62,18 +73,31 @@ func analyzeRun(path string) (runTiming, error) {
 		return runTiming{}, fmt.Errorf("%s: parse param.out.nml: %w", path, err)
 	}
 
+	durationSec, hasDuration := parseMirrorDuration(layout.MirrorOut)
+	mesh, err := readMeshInfo(layout.Outputs)
+	if err != nil {
+		return runTiming{}, fmt.Errorf("%s: read mesh metadata: %w", path, err)
+	}
+
 	stats, err := parseNonFatal(layout.NonFatal)
 	if err != nil {
 		return runTiming{}, fmt.Errorf("%s: parse nonfatal_000000: %w", path, err)
 	}
 	if len(stats) == 0 {
-		return runTiming{}, fmt.Errorf("%s: %w", path, errNoTimingSamples)
-	}
-
-	durationSec, hasDuration := parseMirrorDuration(layout.MirrorOut)
-	mesh, err := readMeshInfo(layout.Outputs)
-	if err != nil {
-		return runTiming{}, fmt.Errorf("%s: read mesh metadata: %w", path, err)
+		return runTiming{
+			Identifier:   runIdentifier(layout.RunDir),
+			Ranks:        mesh.Ranks,
+			Elements:     mesh.Elements,
+			Nodes:        mesh.Nodes,
+			Layers:       mesh.Layers,
+			Tracers:      mesh.Tracers,
+			DT:           dt,
+			Rnday:        math.NaN(),
+			Timings:      nanTimings(),
+			StepsTotal:   math.NaN(),
+			InitDuration: math.NaN(),
+			Duration:     optionalHours(durationSec, hasDuration),
+		}, nil
 	}
 
 	var sums [timingColumnCount]float64
@@ -120,6 +144,21 @@ func analyzeRun(path string) (runTiming, error) {
 	}, nil
 }
 
+func nanTimings() [timingColumnCount]float64 {
+	var timings [timingColumnCount]float64
+	for index := range timings {
+		timings[index] = math.NaN()
+	}
+	return timings
+}
+
+func optionalHours(seconds float64, ok bool) float64 {
+	if !ok {
+		return math.NaN()
+	}
+	return seconds / 3600.0
+}
+
 func resolveRunLayout(path string) (runLayout, error) {
 	path = filepath.Clean(path)
 	info, err := os.Stat(path)
@@ -145,10 +184,8 @@ func resolveRunLayout(path string) (runLayout, error) {
 		NonFatal:  filepath.Join(outputs, "nonfatal_000000"),
 	}
 
-	for _, required := range []string{layout.ParamNML, layout.NonFatal} {
-		if _, err := os.Stat(required); err != nil {
-			return runLayout{}, fmt.Errorf("missing required file %s: %w", required, err)
-		}
+	if _, err := os.Stat(layout.ParamNML); err != nil {
+		return runLayout{}, fmt.Errorf("missing required file %s: %w", layout.ParamNML, err)
 	}
 
 	return layout, nil
@@ -224,19 +261,32 @@ func parseNMLFloat(line string) (float64, error) {
 func parseNonFatal(path string) ([][timingColumnCount]float64, error) {
 	file, err := os.Open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	defer func() { _ = file.Close() }()
 
-	var values []float64
+	var rows [][timingColumnCount]float64
+	var row [timingColumnCount]float64
+	nextColumn := 0
 	lineNumber := 0
 	scanner := newScanner(file)
 	for scanner.Scan() {
 		lineNumber++
-		if lineNumber <= 2 {
+		line := strings.TrimSpace(scanner.Text())
+		column, ok := nonFatalTimingColumn(line)
+		if !ok {
 			continue
 		}
-		line := scanner.Text()
+		if column != nextColumn {
+			row = [timingColumnCount]float64{}
+			nextColumn = 0
+			if column != 0 {
+				continue
+			}
+		}
 		_, rhs, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
@@ -249,20 +299,30 @@ func parseNonFatal(path string) ([][timingColumnCount]float64, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNumber, err)
 		}
-		values = append(values, value)
+		row[column] = value
+		nextColumn++
+		if nextColumn == len(timingColumns) {
+			rows = append(rows, row)
+			row = [timingColumnCount]float64{}
+			nextColumn = 0
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 
-	values = values[:len(values)/len(timingColumns)*len(timingColumns)]
-	rows := make([][timingColumnCount]float64, 0, len(values)/len(timingColumns))
-	for i := 0; i < len(values); i += len(timingColumns) {
-		var row [timingColumnCount]float64
-		copy(row[:], values[i:i+len(timingColumns)])
-		rows = append(rows, row)
-	}
 	return rows, nil
+}
+
+func nonFatalTimingColumn(line string) (int, bool) {
+	for column, prefixes := range nonFatalTimingPrefixes {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(line, prefix) {
+				return column, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func parseMirrorDuration(path string) (float64, bool) {
