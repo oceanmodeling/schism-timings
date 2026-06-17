@@ -63,7 +63,7 @@ func parseableMirrorOut() string {
 }
 
 func TestAnalyzeRunFromFixture(t *testing.T) {
-	row, err := analyzeRun(fixtureRun("20110602.00"))
+	row, err := analyzeRun(fixtureRun("20110602.00"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestAnalyzeRunFromFixture(t *testing.T) {
 }
 
 func TestAnalyzeRunIdentifierIgnoresTrailingSlash(t *testing.T) {
-	row, err := analyzeRun(fixtureRun("20110602.00") + string(filepath.Separator))
+	row, err := analyzeRun(fixtureRun("20110602.00")+string(filepath.Separator), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestAnalyzeRunsPreservesInputOrderWithInvalidWorkerCount(t *testing.T) {
 	completeRun := fixtureRun("20110602.00")
 	incompleteRun := fixtureRun("20110601.00")
 
-	results := analyzeRuns([]string{completeRun, incompleteRun}, 0)
+	results := analyzeRuns([]string{completeRun, incompleteRun}, nil, 0)
 
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d", len(results))
@@ -159,7 +159,7 @@ func TestReadMeshInfo(t *testing.T) {
 }
 
 func TestRunIdentifierIgnoresTrailingSlash(t *testing.T) {
-	identifier := runIdentifier("/project/home/p201203/90_models/joseph_2023/schism513/20110601.00/")
+	identifier := runIdentifier("/project/home/p201203/90_models/joseph_2023/schism513/20110601.00/", "")
 	if identifier != "schism513/20110601.00" {
 		t.Fatalf("identifier = %q", identifier)
 	}
@@ -181,7 +181,7 @@ func TestParseParamOutNMLRequiresDTOnly(t *testing.T) {
 }
 
 func TestAnalyzeRunRequiresMeshMetadataForPartialRows(t *testing.T) {
-	_, err := analyzeRun(fixtureRun("20110601.00"))
+	_, err := analyzeRun(fixtureRun("20110601.00"), "")
 	if err == nil || !strings.Contains(err.Error(), "local_to_global_000000") {
 		t.Fatalf("expected missing local_to_global_000000 error, got %v", err)
 	}
@@ -192,7 +192,7 @@ func TestAnalyzeRunFallsBackWithoutTimingFile(t *testing.T) {
 		"mirror.out": parseableMirrorOut(),
 	})
 
-	row, err := analyzeRun(runDir)
+	row, err := analyzeRun(runDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestAnalyzeRunFallsBackWithEmptyTimingFile(t *testing.T) {
 		"nonfatal_000000": "",
 	})
 
-	row, err := analyzeRun(runDir)
+	row, err := analyzeRun(runDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestAnalyzeRunFallsBackWithNonTimingNonFatalFile(t *testing.T) {
 		"nonfatal_000000": "Max. # of Kriging points = 3\nMax. error in inverting Kriging matrix = 0.0\nWarning detail = not-a-timing-value\n",
 	})
 
-	row, err := analyzeRun(runDir)
+	row, err := analyzeRun(runDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestAnalyzeRunAcceptsSchismMatrixPrepTypo(t *testing.T) {
 		}, "\n"),
 	})
 
-	row, err := analyzeRun(runDir)
+	row, err := analyzeRun(runDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestAnalyzeRunAcceptsSchismMatrixPrepTypo(t *testing.T) {
 func TestAnalyzeRunFallbackLeavesDurationUnavailableWithoutMirror(t *testing.T) {
 	runDir := tempRun(t, "20110603.00", nil)
 
-	row, err := analyzeRun(runDir)
+	row, err := analyzeRun(runDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestAnalyzeRunFallbackLeavesDurationUnavailableWithUnparseableMirror(t *tes
 		"mirror.out": "run started sometime\nrun ended later\n",
 	})
 
-	row, err := analyzeRun(runDir)
+	row, err := analyzeRun(runDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -747,5 +747,195 @@ func assertNaN(t *testing.T, got float64) {
 	t.Helper()
 	if !math.IsNaN(got) {
 		t.Fatalf("got %.17g, want NaN", got)
+	}
+}
+
+func TestDiscoverOutputsDirectRunDir(t *testing.T) {
+	runDir := tempRun(t, "20110602.00", nil)
+	paths, _ := discoverOutputs([]string{runDir}, 3)
+	if len(paths) != 1 || paths[0] != runDir {
+		t.Fatalf("paths = %v, want [%s]", paths, runDir)
+	}
+}
+
+func TestDiscoverOutputsDirectOutputsDir(t *testing.T) {
+	runDir := tempRun(t, "20110602.00", nil)
+	outputsDir := filepath.Join(runDir, "outputs")
+	paths, _ := discoverOutputs([]string{outputsDir}, 3)
+	if len(paths) != 1 || paths[0] != outputsDir {
+		t.Fatalf("paths = %v, want [%s]", paths, outputsDir)
+	}
+}
+
+func TestDiscoverOutputsNestedDiscovery(t *testing.T) {
+	parent := t.TempDir()
+	run1 := filepath.Join(parent, "run1")
+	run2 := filepath.Join(parent, "run2")
+	out1 := filepath.Join(run1, "outputs")
+	out2 := filepath.Join(run2, "outputs")
+	for _, p := range []string{out1, out2} {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, _ := discoverOutputs([]string{parent}, 3)
+	if len(paths) != 2 || paths[0] != out1 || paths[1] != out2 {
+		t.Fatalf("paths = %v, want [%s %s]", paths, out1, out2)
+	}
+}
+
+func TestDiscoverOutputsDepthLimit(t *testing.T) {
+	parent := t.TempDir()
+	a := filepath.Join(parent, "aaa")
+	bb := filepath.Join(a, "bbb")
+	ccc := filepath.Join(bb, "ccc")
+	out := filepath.Join(ccc, "outputs")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := discoverOutputs([]string{parent}, 3)
+	if len(paths) != 0 {
+		t.Fatalf("paths = %v, want []", paths)
+	}
+	paths, _ = discoverOutputs([]string{parent}, 4)
+	if len(paths) != 1 || paths[0] != out {
+		t.Fatalf("paths = %v, want [%s]", paths, out)
+	}
+}
+
+func TestDiscoverOutputsSkipsHiddenDirs(t *testing.T) {
+	parent := t.TempDir()
+	hidden := filepath.Join(parent, ".secret")
+	out := filepath.Join(hidden, "outputs")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := discoverOutputs([]string{parent}, 3)
+	if len(paths) != 0 {
+		t.Fatalf("paths = %v, want []", paths)
+	}
+}
+
+func TestDiscoverOutputsSkipsZarrDirs(t *testing.T) {
+	parent := t.TempDir()
+	for _, name := range []string{"zarr", "archive.zarr"} {
+		zarrDir := filepath.Join(parent, name)
+		out := filepath.Join(zarrDir, "outputs")
+		if err := os.MkdirAll(out, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, _ := discoverOutputs([]string{parent}, 3)
+	if len(paths) != 0 {
+		t.Fatalf("paths = %v, want []", paths)
+	}
+}
+
+func TestDiscoverOutputsDoesNotDescendIntoOutputs(t *testing.T) {
+	parent := t.TempDir()
+	intermediate := filepath.Join(parent, "intermediate")
+	nested := filepath.Join(intermediate, "outputs", "nested", "outputs")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := discoverOutputs([]string{parent}, 3)
+	out := filepath.Join(intermediate, "outputs")
+	if len(paths) != 1 || paths[0] != out {
+		t.Fatalf("paths = %v, want [%s]", paths, out)
+	}
+}
+
+func TestDiscoverOutputsDeduplicates(t *testing.T) {
+	parent := t.TempDir()
+	runDir := filepath.Join(parent, "run")
+	out := filepath.Join(runDir, "outputs")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := discoverOutputs([]string{parent, runDir, out}, 3)
+	if len(paths) != 1 || paths[0] != out {
+		t.Fatalf("paths = %v, want [%s]", paths, out)
+	}
+}
+
+func TestRunHelpTextIncludesDiscoverDepth(t *testing.T) {
+	stdout, _ := runCLI(t, "--help")
+	if !strings.Contains(stdout, "--discover-depth") {
+		t.Fatalf("missing --discover-depth in help, stdout:\n%s", stdout)
+	}
+}
+
+func TestRunDiscoversRunsUnderParentDir(t *testing.T) {
+	parent := t.TempDir()
+	run1 := filepath.Join(parent, "a3d", "20110602.00")
+	out1 := filepath.Join(run1, "outputs")
+	run2 := filepath.Join(parent, "a3d", "20110601.00")
+	out2 := filepath.Join(run2, "outputs")
+
+	for _, out := range []string{out1, out2} {
+		if err := os.MkdirAll(out, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(out, "param.out.nml"), []byte("&CORE\n DT= 900,\n /\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(out, "local_to_global_000000"), []byte("8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(out, "mirror.out"), []byte(parseableMirrorOut()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdout, _ := runCLI(t, "--json", "--columns", "identifier,ranks,duration", parent)
+	if !strings.Contains(stdout, `"identifier": "a3d/20110602.00"`) {
+		t.Fatalf("missing discovered run, stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, `"identifier": "a3d/20110601.00"`) {
+		t.Fatalf("missing discovered run, stdout:\n%s", stdout)
+	}
+}
+
+func TestRunDiscoverDepthZeroDisablesRecursion(t *testing.T) {
+	parent := t.TempDir()
+	run := filepath.Join(parent, "run")
+	out := filepath.Join(run, "outputs")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "param.out.nml"), []byte("&CORE\n DT= 900,\n /\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "local_to_global_000000"), []byte("8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := runCLIError(t, "--discover-depth", "0", parent)
+	if err == nil || !strings.Contains(err.Error(), "no analyzable run directories") {
+		t.Fatalf("expected 'no analyzable run directories' error, got %v", err)
+	}
+}
+
+func TestRunIdentifierUsesRelativePathFromDiscoveryRoot(t *testing.T) {
+	parent := t.TempDir()
+	intermediate := filepath.Join(parent, "project")
+	runDir := filepath.Join(intermediate, "a3d", "20110602.00")
+	out := filepath.Join(runDir, "outputs")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "param.out.nml"), []byte("&CORE\n DT= 900,\n /\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "local_to_global_000000"), []byte("8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "mirror.out"), []byte(parseableMirrorOut()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _ := runCLI(t, "--json", "--columns", "identifier", parent)
+	if !strings.Contains(stdout, `"identifier": "project/a3d/20110602.00"`) {
+		t.Fatalf("expected identifier 'project/a3d/20110602.00', stdout:\n%s", stdout)
 	}
 }

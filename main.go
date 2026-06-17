@@ -41,6 +41,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	sortSpec := fs.String("sort", "identifier", "comma-separated sort columns; prefix with - for descending")
 	workers := fs.Int("workers", defaultWorkers(), "number of run directories to analyze concurrently")
 	reportSkipped := fs.Bool("report-skipped", false, "report input directories that cannot be analyzed")
+	discoverDepth := fs.Int("discover-depth", 4, "max directory depth for discovering outputs directories beneath each DIR")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	showHelp := fs.BoolP("help", "h", false, "show help and exit")
 	writeUsage := func(format string, args ...any) {
@@ -62,6 +63,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 		writeUsage("    \tcomma-separated sort columns; prefix with - for descending (default \"identifier\")\n")
 		writeUsage("  --workers int\n")
 		writeUsage("    \tnumber of run directories to analyze concurrently (default %d)\n", defaultWorkers())
+		writeUsage("  --discover-depth int\n")
+		writeUsage("    \tmax directory depth for discovering outputs directories beneath each DIR (default 4)\n")
 		writeUsage("  --report-skipped\n")
 		writeUsage("    \treport input directories that cannot be analyzed\n")
 		writeUsage("  --version\n")
@@ -106,7 +109,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	}
 
 	var rows []runTiming
-	for _, result := range analyzeRuns(fs.Args(), *workers) {
+	inputPaths, roots := discoverOutputs(fs.Args(), *discoverDepth)
+	for _, result := range analyzeRuns(inputPaths, roots, *workers) {
 		if result.err != nil {
 			if *reportSkipped {
 				if _, err := fmt.Fprintf(stderr, "warning: skipping %s: %v\n", result.path, result.err); err != nil {
@@ -265,7 +269,7 @@ func parseOutputColumns(spec string) ([]resultColumn, error) {
 	return columns, nil
 }
 
-func analyzeRuns(paths []string, workers int) []runResult {
+func analyzeRuns(paths []string, roots map[string]string, workers int) []runResult {
 	if len(paths) == 0 {
 		return nil
 	}
@@ -285,7 +289,7 @@ func analyzeRuns(paths []string, workers int) []runResult {
 			defer wg.Done()
 			for index := range work {
 				path := paths[index]
-				row, err := analyzeRun(path)
+				row, err := analyzeRun(path, roots[path])
 				results[index] = runResult{
 					path: path,
 					row:  row,

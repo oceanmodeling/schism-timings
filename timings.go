@@ -62,7 +62,7 @@ type runLayout struct {
 	NonFatal  string
 }
 
-func analyzeRun(path string) (runTiming, error) {
+func analyzeRun(path string, root string) (runTiming, error) {
 	layout, err := resolveRunLayout(path)
 	if err != nil {
 		return runTiming{}, fmt.Errorf("%s: %w", path, err)
@@ -85,7 +85,7 @@ func analyzeRun(path string) (runTiming, error) {
 	}
 	if len(stats) == 0 {
 		return runTiming{
-			Identifier:   runIdentifier(layout.RunDir),
+			Identifier:   runIdentifier(layout.RunDir, root),
 			Ranks:        mesh.Ranks,
 			Elements:     mesh.Elements,
 			Nodes:        mesh.Nodes,
@@ -129,7 +129,7 @@ func analyzeRun(path string) (runTiming, error) {
 	}
 
 	return runTiming{
-		Identifier:   runIdentifier(layout.RunDir),
+		Identifier:   runIdentifier(layout.RunDir, root),
 		Ranks:        mesh.Ranks,
 		Elements:     mesh.Elements,
 		Nodes:        mesh.Nodes,
@@ -191,8 +191,15 @@ func resolveRunLayout(path string) (runLayout, error) {
 	return layout, nil
 }
 
-func runIdentifier(runDir string) string {
+func runIdentifier(runDir, root string) string {
 	runDir = filepath.Clean(runDir)
+	if root != "" {
+		root = filepath.Clean(root)
+		rel, err := filepath.Rel(root, runDir)
+		if err == nil {
+			return filepath.ToSlash(rel)
+		}
+	}
 	parent := filepath.Base(filepath.Dir(runDir))
 	base := filepath.Base(runDir)
 	if parent == "." || parent == string(filepath.Separator) {
