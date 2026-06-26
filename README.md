@@ -25,12 +25,12 @@ schism-timings /runs/r04*/20*
 ```
 
 ```text
-identifier         | ranks  elements     nodes  layers  tracers |  dt    rnday | force_prep  mom_advection  matrix_prep  solver  3D_vel  transport  outputs  steps_total |   init  duration
-r0401/20200101.00  |  2556  21136211  11078206      33        2 | 120   1.0000 |     0.1071         0.2088       0.0447  0.0603  0.0250     0.7033   0.0604       1.2095 | 0.3314    1.5410
-r0401b/20200101.00 |  2556  21136211  11078206      33        2 | 120   1.0000 |     0.1045         0.2107       0.0401  0.0483  0.0254     0.7051   0.0419       1.1761 | 0.3063    1.4824
-r0403/20200131.00  |  5276  21136211  11078206      33        2 | 120  60.0000 |     0.0578         0.1096       0.0192  0.0363  0.0128     0.3718   0.0429       0.6505 | 0.3401   39.3713
-r0403/20200331.00  |  5276  21136211  11078206      33        2 | 120  60.0000 |     0.0570         0.1064       0.0192  0.0398  0.0127     0.3753   0.0431       0.6535 | 0.3384   39.5478
-r0404/20200101.00  |  5276  21136211  11078206      33        2 | 120  16.6333 |     0.0574         0.1088       0.0190  0.0381  0.0126     0.3760   0.0500       0.6618 |     NA  -11.0081
+identifier         | ranks  threads  scribes  elements     nodes  layers  tracers |  dt    rnday | force_prep  mom_advection  matrix_prep  solver  3D_vel  transport  outputs  steps_total |   init  duration
+r0401/20200101.00  |  2556        -        4  21136211  11078206      33        2 | 120   1.0000 |     0.1071         0.2088       0.0447  0.0603  0.0250     0.7033   0.0604       1.2095 | 0.3314    1.5410
+r0401b/20200101.00 |  2556        -        4  21136211  11078206      33        2 | 120   1.0000 |     0.1045         0.2107       0.0401  0.0483  0.0254     0.7051   0.0419       1.1761 | 0.3063    1.4824
+r0403/20200131.00  |  5276        -        4  21136211  11078206      33        2 | 120  60.0000 |     0.0578         0.1096       0.0192  0.0363  0.0128     0.3718   0.0429       0.6505 | 0.3401   39.3713
+r0403/20200331.00  |  5276        -        4  21136211  11078206      33        2 | 120  60.0000 |     0.0570         0.1064       0.0192  0.0398  0.0127     0.3753   0.0431       0.6535 | 0.3384   39.5478
+r0404/20200101.00  |  5276        -        4  21136211  11078206      33        2 | 120  16.6333 |     0.0574         0.1088       0.0190  0.0381  0.0126     0.3760   0.0500       0.6618 |     NA  -11.0081
 ```
 
 You can also pass a parent directory and let `schism-timings` discover nested
@@ -112,10 +112,10 @@ pre-commit run --all-files
 
 ## SCHISM Timing Requirements
 
-`schism-timings` reads mesh and configuration metadata from standard SCHISM
-output files. When `outputs/mirror.out` has parseable run start and completion
-timestamps, the tool can also report wall-clock duration without per-step
-timing data.
+`schism-timings` reads mesh, rank, OpenMP thread, tracer, scribe, and duration
+metadata from `outputs/mirror.out`. When `outputs/mirror.out` has parseable run
+start and completion timestamps, the tool can report wall-clock duration
+without per-step timing data.
 
 Detailed timing columns require the per-step timing lines from
 `outputs/nonfatal_000000`, such as `Time (sec) taken for force prep=` and
@@ -135,9 +135,6 @@ For the legacy make build, enable the corresponding module option:
 USE_TIMER2 = yes
 EXEC := $(EXEC)_TIMER2
 ```
-
-`INCLUDE_TIMING` / `USE_TIMER` is separate SCHISM instrumentation and does not
-produce the `nonfatal_000000` timing lines parsed by this CLI.
 
 If `TIMER2` data is missing, empty, or incomplete, `schism-timings` still emits
 a partial row when the non-TIMER2 inputs are available. TIMER2-derived columns

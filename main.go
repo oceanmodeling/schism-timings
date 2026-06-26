@@ -160,6 +160,8 @@ func buildResultColumns() []resultColumn {
 	columns := []resultColumn{
 		stringColumn("identifier", func(row runTiming) string { return row.Identifier }, false),
 		intColumn("ranks", func(row runTiming) int { return row.Ranks }, true),
+		optionalIntColumn("threads", func(row runTiming) int { return row.Threads }, false),
+		intColumn("scribes", func(row runTiming) int { return row.Scribes }, false),
 		intColumn("elements", func(row runTiming) int { return row.Elements }, false),
 		intColumn("nodes", func(row runTiming) int { return row.Nodes }, false),
 		intColumn("layers", func(row runTiming) int { return row.Layers }, false),
@@ -206,6 +208,30 @@ func intColumn(name string, value func(runTiming) int, groupHead bool) resultCol
 		},
 		jsonValue: func(row runTiming) any {
 			return value(row)
+		},
+		groupHead: groupHead,
+	}
+}
+
+func optionalIntColumn(name string, value func(runTiming) int, groupHead bool) resultColumn {
+	return resultColumn{
+		name: name,
+		stringValue: func(row runTiming) string {
+			value := value(row)
+			if value == 0 {
+				return "-"
+			}
+			return strconv.Itoa(value)
+		},
+		compare: func(left runTiming, right runTiming) int {
+			return compareOptionalInts(value(left), value(right))
+		},
+		jsonValue: func(row runTiming) any {
+			value := value(row)
+			if value == 0 {
+				return nil
+			}
+			return value
 		},
 		groupHead: groupHead,
 	}
@@ -370,6 +396,21 @@ func compareRows(left runTiming, right runTiming, column string) int {
 		return 0
 	}
 	return columnDef.compare(left, right)
+}
+
+func compareOptionalInts(left int, right int) int {
+	leftMissing := left == 0
+	rightMissing := right == 0
+	switch {
+	case leftMissing && rightMissing:
+		return 0
+	case leftMissing:
+		return 1
+	case rightMissing:
+		return -1
+	default:
+		return cmp.Compare(left, right)
+	}
 }
 
 func compareFloats(left float64, right float64) int {

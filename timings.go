@@ -42,6 +42,8 @@ const maxScannerTokenSize = 1024 * 1024
 type runTiming struct {
 	Identifier   string
 	Ranks        int
+	Threads      int
+	Scribes      int
 	Elements     int
 	Nodes        int
 	Layers       int
@@ -73,10 +75,9 @@ func analyzeRun(path string, root string) (runTiming, error) {
 		return runTiming{}, fmt.Errorf("%s: parse param.out.nml: %w", path, err)
 	}
 
-	durationSec, hasDuration := parseMirrorDuration(layout.MirrorOut)
-	mesh, err := readMeshInfo(layout.Outputs)
+	metadata, durationSec, hasDuration, err := parseMirrorOut(layout.MirrorOut)
 	if err != nil {
-		return runTiming{}, fmt.Errorf("%s: read mesh metadata: %w", path, err)
+		return runTiming{}, fmt.Errorf("%s: parse mirror.out metadata: %w", path, err)
 	}
 
 	stats, err := parseNonFatal(layout.NonFatal)
@@ -86,11 +87,13 @@ func analyzeRun(path string, root string) (runTiming, error) {
 	if len(stats) == 0 {
 		return runTiming{
 			Identifier:   runIdentifier(layout.RunDir, root),
-			Ranks:        mesh.Ranks,
-			Elements:     mesh.Elements,
-			Nodes:        mesh.Nodes,
-			Layers:       mesh.Layers,
-			Tracers:      mesh.Tracers,
+			Ranks:        metadata.Ranks,
+			Threads:      metadata.Threads,
+			Scribes:      metadata.Scribes,
+			Elements:     metadata.Elements,
+			Nodes:        metadata.Nodes,
+			Layers:       metadata.Layers,
+			Tracers:      metadata.Tracers,
 			DT:           dt,
 			Rnday:        math.NaN(),
 			Timings:      nanTimings(),
@@ -130,11 +133,13 @@ func analyzeRun(path string, root string) (runTiming, error) {
 
 	return runTiming{
 		Identifier:   runIdentifier(layout.RunDir, root),
-		Ranks:        mesh.Ranks,
-		Elements:     mesh.Elements,
-		Nodes:        mesh.Nodes,
-		Layers:       mesh.Layers,
-		Tracers:      mesh.Tracers,
+		Ranks:        metadata.Ranks,
+		Threads:      metadata.Threads,
+		Scribes:      metadata.Scribes,
+		Elements:     metadata.Elements,
+		Nodes:        metadata.Nodes,
+		Layers:       metadata.Layers,
+		Tracers:      metadata.Tracers,
 		DT:           dt,
 		Rnday:        rnday,
 		Timings:      timings,
@@ -332,37 +337,244 @@ func nonFatalTimingColumn(line string) (int, bool) {
 	return 0, false
 }
 
-func parseMirrorDuration(path string) (float64, bool) {
+type runMetadata struct {
+	Ranks    int
+	Threads  int
+	Scribes  int
+	Elements int
+	Nodes    int
+	Layers   int
+	Tracers  int
+}
+
+func parseMirrorOut(path string) (runMetadata, float64, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return 0, false
+		return runMetadata{}, 0, false, err
 	}
 	defer func() { _ = file.Close() }()
 
 	scanner := newScanner(file)
+	var metadata runMetadata
 	var first, last string
+	var haveTracers, haveGrid, haveRanks, haveScribes bool
+	var rankRows map[int]bool
+	inRankTable := false
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		if first == "" {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && first == "" {
 			first = line
 		}
-		if strings.TrimSpace(line) != "" {
+		if trimmed != "" {
 			last = line
 		}
+
+		if inRankTable {
+			if trimmed == "" {
+				continue
+			}
+			rank, ok, err := parseRankTableRow(trimmed)
+			if err != nil {
+				return runMetadata{}, 0, false, err
+			}
+			if ok {
+				if rankRows[rank] {
+					return runMetadata{}, 0, false, fmt.Errorf("duplicate rank %d in mirror.out rank table", rank)
+				}
+				rankRows[rank] = true
+				continue
+			}
+			if len(rankRows) > 0 {
+				ranks, err := rankCount(rankRows)
+				if err != nil {
+					return runMetadata{}, 0, false, err
+				}
+				metadata.Ranks = ranks
+				haveRanks = true
+			}
+			inRankTable = false
+		}
+
+		if !haveTracers && strings.HasPrefix(trimmed, "Total # of tracers=") {
+			tracers, err := parseMirrorTracers(trimmed)
+			if err != nil {
+				return runMetadata{}, 0, false, err
+			}
+			metadata.Tracers = tracers
+			haveTracers = true
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "hybrid openMP-MPI run with # of threads=") {
+			threads, err := parseMirrorThreads(trimmed)
+			if err != nil {
+				return runMetadata{}, 0, false, err
+			}
+			metadata.Threads = threads
+			continue
+		}
+
+		if !haveGrid && strings.HasPrefix(trimmed, "Global Grid Size") {
+			elements, nodes, layers, err := parseMirrorGridSize(trimmed)
+			if err != nil {
+				return runMetadata{}, 0, false, err
+			}
+			metadata.Elements = elements
+			metadata.Nodes = nodes
+			metadata.Layers = layers
+			haveGrid = true
+			continue
+		}
+
+		if !haveRanks && isRankTableHeader(trimmed) {
+			inRankTable = true
+			rankRows = make(map[int]bool)
+			continue
+		}
+
+		if !haveScribes && strings.HasPrefix(trimmed, "# of scribe can be set as small as:") {
+			scribes, err := parseMirrorScribes(trimmed)
+			if err != nil {
+				return runMetadata{}, 0, false, err
+			}
+			metadata.Scribes = scribes
+			haveScribes = true
+			continue
+		}
 	}
-	if scanner.Err() != nil {
-		return 0, false
+	if inRankTable && len(rankRows) > 0 {
+		ranks, err := rankCount(rankRows)
+		if err != nil {
+			return runMetadata{}, 0, false, err
+		}
+		metadata.Ranks = ranks
+		haveRanks = true
+	}
+	if err := scanner.Err(); err != nil {
+		return runMetadata{}, 0, false, err
+	}
+
+	switch {
+	case !haveTracers:
+		return runMetadata{}, 0, false, errors.New("Total # of tracers not found")
+	case !haveGrid:
+		return runMetadata{}, 0, false, errors.New("Global Grid Size not found")
+	case !haveRanks:
+		return runMetadata{}, 0, false, errors.New("rank table not found")
+	case !haveScribes:
+		return runMetadata{}, 0, false, errors.New("# of scribe line not found")
 	}
 
 	start, err := parseMirrorTimestamp(first)
 	if err != nil {
-		return 0, false
+		return metadata, 0, false, nil
 	}
 	end, err := parseMirrorTimestamp(last)
 	if err != nil {
-		return 0, false
+		return metadata, 0, false, nil
 	}
-	return end.Sub(start).Seconds(), true
+	return metadata, end.Sub(start).Seconds(), true, nil
+}
+
+func parseMirrorTracers(line string) (int, error) {
+	_, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return 0, fmt.Errorf("parse tracers from %q: missing '='", line)
+	}
+	fields := strings.Fields(value)
+	if len(fields) < 1 {
+		return 0, fmt.Errorf("parse tracers from %q: missing value", line)
+	}
+	return parseNonNegativeField(fields, 0, "tracers")
+}
+
+func parseMirrorThreads(line string) (int, error) {
+	_, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return 0, fmt.Errorf("parse OpenMP threads from %q: missing '='", line)
+	}
+	fields := strings.Fields(value)
+	if len(fields) < 1 {
+		return 0, fmt.Errorf("parse OpenMP threads from %q: missing value", line)
+	}
+	return parsePositiveField(fields, 0, "threads")
+}
+
+func parseMirrorGridSize(line string) (int, int, int, error) {
+	_, value, ok := strings.Cut(line, ":")
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("parse grid size from %q: missing ':'", line)
+	}
+	fields := strings.Fields(value)
+	if len(fields) < 4 {
+		return 0, 0, 0, fmt.Errorf("expected at least 4 Global Grid Size fields, got %d", len(fields))
+	}
+	elements, err := parsePositiveField(fields, 0, "elements")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	nodes, err := parsePositiveField(fields, 1, "nodes")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	layers, err := parsePositiveField(fields, 3, "layers")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return elements, nodes, layers, nil
+}
+
+func parseMirrorScribes(line string) (int, error) {
+	_, value, ok := strings.Cut(line, ":")
+	if !ok {
+		return 0, fmt.Errorf("parse scribes from %q: missing ':'", line)
+	}
+	fields := strings.Fields(value)
+	if len(fields) < 2 {
+		return 0, fmt.Errorf("expected at least 2 scribe fields, got %d", len(fields))
+	}
+	return parsePositiveField(fields, 1, "scribes")
+}
+
+func isRankTableHeader(line string) bool {
+	fields := strings.Fields(line)
+	return len(fields) > 0 && fields[0] == "rank"
+}
+
+func parseRankTableRow(line string) (int, bool, error) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return 0, false, nil
+	}
+	rank, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, false, nil
+	}
+	if rank < 0 {
+		return 0, false, fmt.Errorf("negative rank %d in mirror.out rank table", rank)
+	}
+	return rank, true, nil
+}
+
+func rankCount(rows map[int]bool) (int, error) {
+	if len(rows) == 0 {
+		return 0, errors.New("empty mirror.out rank table")
+	}
+
+	maxRank := -1
+	for rank := range rows {
+		if rank > maxRank {
+			maxRank = rank
+		}
+	}
+	for rank := 0; rank <= maxRank; rank++ {
+		if !rows[rank] {
+			return 0, fmt.Errorf("missing rank %d in mirror.out rank table", rank)
+		}
+	}
+	return maxRank + 1, nil
 }
 
 func parseMirrorTimestamp(line string) (time.Time, error) {
@@ -372,65 +584,6 @@ func parseMirrorTimestamp(line string) (time.Time, error) {
 	}
 	value := strings.TrimSpace(line[idx+4:])
 	return time.Parse("20060102, 150405.999999999", value)
-}
-
-type meshInfo struct {
-	Ranks    int
-	Elements int
-	Nodes    int
-	Layers   int
-	Tracers  int
-}
-
-func readMeshInfo(outputs string) (meshInfo, error) {
-	path := filepath.Join(outputs, "local_to_global_000000")
-	file, err := os.Open(path)
-	if err != nil {
-		return meshInfo{}, err
-	}
-	defer func() { _ = file.Close() }()
-
-	scanner := newScanner(file)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return meshInfo{}, err
-		}
-		return meshInfo{}, errors.New("empty local_to_global_000000")
-	}
-
-	fields := strings.Fields(scanner.Text())
-	if len(fields) < 6 {
-		return meshInfo{}, fmt.Errorf("expected at least 6 fields in first line, got %d", len(fields))
-	}
-
-	elements, err := parsePositiveField(fields, 1, "elements")
-	if err != nil {
-		return meshInfo{}, err
-	}
-	nodes, err := parsePositiveField(fields, 2, "nodes")
-	if err != nil {
-		return meshInfo{}, err
-	}
-	layers, err := parsePositiveField(fields, 3, "layers")
-	if err != nil {
-		return meshInfo{}, err
-	}
-	ranks, err := parsePositiveField(fields, 4, "ranks")
-	if err != nil {
-		return meshInfo{}, err
-	}
-	tracers, err := parseNonNegativeField(fields, 5, "tracers")
-	if err != nil {
-		return meshInfo{}, err
-	}
-
-	return meshInfo{
-		Ranks:    ranks,
-		Elements: elements,
-		Nodes:    nodes,
-		Layers:   layers,
-		Tracers:  tracers,
-	}, nil
 }
 
 func newScanner(file *os.File) *bufio.Scanner {
@@ -453,7 +606,7 @@ func parsePositiveField(fields []string, index int, name string) (int, error) {
 func parseNonNegativeField(fields []string, index int, name string) (int, error) {
 	value, err := strconv.Atoi(fields[index])
 	if err != nil {
-		return 0, fmt.Errorf("parse %s from first line: %w", name, err)
+		return 0, fmt.Errorf("parse %s: %w", name, err)
 	}
 	if value < 0 {
 		return 0, fmt.Errorf("negative %s %d", name, value)

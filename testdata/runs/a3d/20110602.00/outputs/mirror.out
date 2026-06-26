@@ -1,2 +1,12 @@
 Run begins at 20250101, 000000.000
+ Total # of tracers=           2
+Global Grid Size (ne,np,ns,nvrt):       5839      3140      8986        49
+
+**********Augmented Subdomain Sizes**********
+ rank     nea      ne     neg
+    0    1141     975     166
+    1    1134     975     159
+    2    1052     975      77
+ Max. dot product of 3 axes=   1.66533454E-16
+ # of scribe can be set as small as:           1           2
 Run completed successfully at 20250101, 000300.000

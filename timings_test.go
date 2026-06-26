@@ -44,8 +44,8 @@ func tempRun(t *testing.T, name string, extraOutputFiles map[string]string) stri
 	}
 
 	files := map[string]string{
-		"param.out.nml":          "&CORE\n DT= 900.00000000000000,\n /\n",
-		"local_to_global_000000": "8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n",
+		"param.out.nml": "&CORE\n DT= 900.00000000000000,\n /\n",
+		"mirror.out":    parseableMirrorOut(),
 	}
 	for name, content := range extraOutputFiles {
 		files[name] = content
@@ -59,7 +59,50 @@ func tempRun(t *testing.T, name string, extraOutputFiles map[string]string) stri
 }
 
 func parseableMirrorOut() string {
-	return "Run begins at 20250101, 000000.000\nRun completed successfully at 20250101, 000300.000\n"
+	lines := []string{
+		"Run begins at 20250101, 000000.000",
+		" Total # of tracers=           2",
+		"Global Grid Size (ne,np,ns,nvrt):       5839      3140      8986        49",
+		"",
+		"**********Augmented Subdomain Sizes**********",
+		" rank     nea      ne     neg",
+		"    0    1141     975     166",
+		"    1    1134     975     159",
+		"    2    1052     975      77",
+		" Max. dot product of 3 axes=   1.66533454E-16",
+		" # of scribe can be set as small as:           1           2",
+		"Run completed successfully at 20250101, 000300.000",
+		"",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func mirrorOutWithThreads(threads string) string {
+	return strings.Replace(
+		parseableMirrorOut(),
+		"Run begins at 20250101, 000000.000\n",
+		"Run begins at 20250101, 000000.000\n hybrid openMP-MPI run with # of threads=           "+threads+"\n",
+		1,
+	)
+}
+
+func mirrorOutWithoutTimestamps() string {
+	lines := []string{
+		"run started sometime",
+		" Total # of tracers=           2",
+		"Global Grid Size (ne,np,ns,nvrt):       5839      3140      8986        49",
+		"",
+		"**********Augmented Subdomain Sizes**********",
+		" rank     nea      ne     neg",
+		"    0    1141     975     166",
+		"    1    1134     975     159",
+		"    2    1052     975      77",
+		" Max. dot product of 3 axes=   1.66533454E-16",
+		" # of scribe can be set as small as:           1           2",
+		"run ended later",
+		"",
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestAnalyzeRunFromFixture(t *testing.T) {
@@ -73,6 +116,12 @@ func TestAnalyzeRunFromFixture(t *testing.T) {
 	}
 	if row.Ranks != 3 {
 		t.Fatalf("Ranks = %d", row.Ranks)
+	}
+	if row.Threads != 0 {
+		t.Fatalf("Threads = %d", row.Threads)
+	}
+	if row.Scribes != 2 {
+		t.Fatalf("Scribes = %d", row.Scribes)
 	}
 	if row.Elements != 5839 {
 		t.Fatalf("Elements = %d", row.Elements)
@@ -131,30 +180,84 @@ func TestAnalyzeRunsPreservesInputOrderWithInvalidWorkerCount(t *testing.T) {
 	if results[1].path != incompleteRun {
 		t.Fatalf("results[1].path = %q", results[1].path)
 	}
-	if results[1].err == nil || !strings.Contains(results[1].err.Error(), "local_to_global_000000") {
-		t.Fatalf("expected missing local_to_global_000000 error, got %v", results[1].err)
+	if results[1].err == nil || !strings.Contains(results[1].err.Error(), "mirror.out") {
+		t.Fatalf("expected missing mirror.out error, got %v", results[1].err)
 	}
 }
 
-func TestReadMeshInfo(t *testing.T) {
-	mesh, err := readMeshInfo(fixtureOutputs("20110602.00"))
+func TestParseMirrorOutMetadata(t *testing.T) {
+	metadata, durationSec, hasDuration, err := parseMirrorOut(filepath.Join(fixtureOutputs("20110602.00"), "mirror.out"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mesh.Ranks != 3 {
-		t.Fatalf("Ranks = %d", mesh.Ranks)
+	if metadata.Ranks != 3 {
+		t.Fatalf("Ranks = %d", metadata.Ranks)
 	}
-	if mesh.Elements != 5839 {
-		t.Fatalf("Elements = %d", mesh.Elements)
+	if metadata.Threads != 0 {
+		t.Fatalf("Threads = %d", metadata.Threads)
 	}
-	if mesh.Nodes != 3140 {
-		t.Fatalf("Nodes = %d", mesh.Nodes)
+	if metadata.Scribes != 2 {
+		t.Fatalf("Scribes = %d", metadata.Scribes)
 	}
-	if mesh.Layers != 49 {
-		t.Fatalf("Layers = %d", mesh.Layers)
+	if metadata.Elements != 5839 {
+		t.Fatalf("Elements = %d", metadata.Elements)
 	}
-	if mesh.Tracers != 2 {
-		t.Fatalf("Tracers = %d", mesh.Tracers)
+	if metadata.Nodes != 3140 {
+		t.Fatalf("Nodes = %d", metadata.Nodes)
+	}
+	if metadata.Layers != 49 {
+		t.Fatalf("Layers = %d", metadata.Layers)
+	}
+	if metadata.Tracers != 2 {
+		t.Fatalf("Tracers = %d", metadata.Tracers)
+	}
+	if !hasDuration {
+		t.Fatal("expected duration")
+	}
+	assertClose(t, durationSec, 180)
+}
+
+func TestParseMirrorOutRanksFromBoundaryTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mirror.out")
+	content := strings.Join([]string{
+		"Run begins at 20250101, 000000.000",
+		" Total # of tracers=           2",
+		"Global Grid Size (ne,np,ns,nvrt):       5839      3140      8986        49",
+		"**********Augmented Subdomain Boundary Sizes**********",
+		"    rank    nope    neta   nland    nvel",
+		"       0       0       0       7      93",
+		"       1       0       0       6      96",
+		"       2       0       0       5      83",
+		" done domain decomp...",
+		" # of scribe can be set as small as:           1           2",
+		"Run completed successfully at 20250101, 000300.000",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata, _, _, err := parseMirrorOut(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Ranks != 3 {
+		t.Fatalf("Ranks = %d", metadata.Ranks)
+	}
+}
+
+func TestParseMirrorOutOpenMPThreads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mirror.out")
+	if err := os.WriteFile(path, []byte(mirrorOutWithThreads("1")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata, _, _, err := parseMirrorOut(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Threads != 1 {
+		t.Fatalf("Threads = %d", metadata.Threads)
 	}
 }
 
@@ -180,10 +283,10 @@ func TestParseParamOutNMLRequiresDTOnly(t *testing.T) {
 	}
 }
 
-func TestAnalyzeRunRequiresMeshMetadataForPartialRows(t *testing.T) {
+func TestAnalyzeRunRequiresMirrorMetadataForPartialRows(t *testing.T) {
 	_, err := analyzeRun(fixtureRun("20110601.00"), "")
-	if err == nil || !strings.Contains(err.Error(), "local_to_global_000000") {
-		t.Fatalf("expected missing local_to_global_000000 error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "mirror.out") {
+		t.Fatalf("expected missing mirror.out error, got %v", err)
 	}
 }
 
@@ -202,6 +305,12 @@ func TestAnalyzeRunFallsBackWithoutTimingFile(t *testing.T) {
 	}
 	if row.Ranks != 3 {
 		t.Fatalf("Ranks = %d", row.Ranks)
+	}
+	if row.Threads != 0 {
+		t.Fatalf("Threads = %d", row.Threads)
+	}
+	if row.Scribes != 2 {
+		t.Fatalf("Scribes = %d", row.Scribes)
 	}
 	if row.Elements != 5839 {
 		t.Fatalf("Elements = %d", row.Elements)
@@ -292,8 +401,10 @@ func TestAnalyzeRunAcceptsSchismMatrixPrepTypo(t *testing.T) {
 	assertClose(t, row.Duration, 180.0/3600.0)
 }
 
-func TestAnalyzeRunFallbackLeavesDurationUnavailableWithoutMirror(t *testing.T) {
-	runDir := tempRun(t, "20110603.00", nil)
+func TestAnalyzeRunFallbackLeavesDurationUnavailableWithoutTimestamps(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": mirrorOutWithoutTimestamps(),
+	})
 
 	row, err := analyzeRun(runDir, "")
 	if err != nil {
@@ -308,7 +419,7 @@ func TestAnalyzeRunFallbackLeavesDurationUnavailableWithoutMirror(t *testing.T) 
 
 func TestAnalyzeRunFallbackLeavesDurationUnavailableWithUnparseableMirror(t *testing.T) {
 	runDir := tempRun(t, "20110603.00", map[string]string{
-		"mirror.out": "run started sometime\nrun ended later\n",
+		"mirror.out": mirrorOutWithoutTimestamps(),
 	})
 
 	row, err := analyzeRun(runDir, "")
@@ -357,7 +468,9 @@ func TestRunWritesPartialCSVWithoutWarning(t *testing.T) {
 }
 
 func TestRunWritesPartialJSONNulls(t *testing.T) {
-	runDir := tempRun(t, "20110603.00", nil)
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": mirrorOutWithoutTimestamps(),
+	})
 
 	stdout, stderr := runCLI(t, "--json", "--columns", "identifier,force_prep,steps_total,init,duration", runDir)
 	if stderr != "" {
@@ -389,10 +502,10 @@ func TestRunWritesCSVAndWarnsForIncompleteInputs(t *testing.T) {
 	if !strings.Contains(stderr, "warning: skipping "+incompleteRun) {
 		t.Fatalf("missing warning, stderr:\n%s", stderr)
 	}
-	if !strings.Contains(stdout, "identifier,ranks,elements,nodes,layers,tracers,dt,rnday") {
+	if !strings.Contains(stdout, "identifier,ranks,threads,scribes,elements,nodes,layers,tracers,dt,rnday") {
 		t.Fatalf("missing CSV header, stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
+	if !strings.Contains(stdout, "a3d/20110602.00,3,-,2,5839,3140,49,2,900,0.0417,") {
 		t.Fatalf("missing analyzed row, stdout:\n%s", stdout)
 	}
 }
@@ -422,7 +535,7 @@ func TestRunSkipsIncompleteInputsQuietlyByDefault(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-	if !strings.Contains(stdout, "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
+	if !strings.Contains(stdout, "a3d/20110602.00,3,-,2,5839,3140,49,2,900,0.0417,") {
 		t.Fatalf("missing analyzed row, stdout:\n%s", stdout)
 	}
 }
@@ -440,6 +553,12 @@ func TestRunWritesJSON(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"ranks": 3`) {
 		t.Fatalf("missing ranks, stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, `"threads": null`) {
+		t.Fatalf("missing null threads, stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, `"scribes": 2`) {
+		t.Fatalf("missing scribes, stdout:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, `"elements": 5839`) {
 		t.Fatalf("missing elements, stdout:\n%s", stdout)
@@ -464,6 +583,21 @@ func TestRunWritesSelectedCSVColumns(t *testing.T) {
 		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
 	want := "identifier,outputs\na3d/20110602.00,0.2267\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunWritesOpenMPThreadsColumn(t *testing.T) {
+	runDir := tempRun(t, "20110603.00", map[string]string{
+		"mirror.out": mirrorOutWithThreads("1"),
+	})
+
+	stdout, stderr := runCLI(t, "--csv", "--columns", "identifier,threads", runDir)
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got:\n%s", stderr)
+	}
+	want := "identifier,threads\na3d/20110603.00,1\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
@@ -536,7 +670,7 @@ func TestRunParsesOutputFlagsAfterPositionalArgs(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-	if !strings.Contains(stdout, "identifier,ranks,elements,nodes,layers,tracers,dt,rnday") {
+	if !strings.Contains(stdout, "identifier,ranks,threads,scribes,elements,nodes,layers,tracers,dt,rnday") {
 		t.Fatalf("missing CSV header, stdout:\n%s", stdout)
 	}
 }
@@ -557,7 +691,7 @@ func TestRunParsesSortFlagAfterPositionalArgs(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got:\n%s", stderr)
 	}
-	if !strings.Contains(stdout, "a3d/20110602.00,3,5839,3140,49,2,900,0.0417,") {
+	if !strings.Contains(stdout, "a3d/20110602.00,3,-,2,5839,3140,49,2,900,0.0417,") {
 		t.Fatalf("missing analyzed row, stdout:\n%s", stdout)
 	}
 }
@@ -879,9 +1013,6 @@ func TestRunDiscoversRunsUnderParentDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(out, "param.out.nml"), []byte("&CORE\n DT= 900,\n /\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(out, "local_to_global_000000"), []byte("8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
 		if err := os.WriteFile(filepath.Join(out, "mirror.out"), []byte(parseableMirrorOut()), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -906,9 +1037,6 @@ func TestRunDiscoverDepthZeroDisablesRecursion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(out, "param.out.nml"), []byte("&CORE\n DT= 900,\n /\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(out, "local_to_global_000000"), []byte("8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	_, _, err := runCLIError(t, "--discover-depth", "0", parent)
 	if err == nil || !strings.Contains(err.Error(), "no analyzable run directories") {
@@ -925,9 +1053,6 @@ func TestRunIdentifierUsesRelativePathFromDiscoveryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(out, "param.out.nml"), []byte("&CORE\n DT= 900,\n /\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(out, "local_to_global_000000"), []byte("8986 5839 3140 49 3 2 1 1 0 0 0 0 0 0 0 0 0 0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(out, "mirror.out"), []byte(parseableMirrorOut()), 0o600); err != nil {
