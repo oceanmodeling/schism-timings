@@ -458,9 +458,9 @@ func parseMirrorOut(path string) (runMetadata, float64, bool, error) {
 
 	switch {
 	case !haveTracers:
-		return runMetadata{}, 0, false, errors.New("Total # of tracers not found")
+		return runMetadata{}, 0, false, errors.New("total # of tracers not found")
 	case !haveGrid:
-		return runMetadata{}, 0, false, errors.New("Global Grid Size not found")
+		return runMetadata{}, 0, false, errors.New("global grid size not found")
 	case !haveRanks:
 		return runMetadata{}, 0, false, errors.New("rank table not found")
 	case !haveScribes:
