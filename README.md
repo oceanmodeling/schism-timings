@@ -1,5 +1,10 @@
 # schism-timings
 
+[![CI](https://github.com/oceanmodeling/schism-timings/actions/workflows/ci.yml/badge.svg)](https://github.com/oceanmodeling/schism-timings/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/oceanmodeling/schism-timings?sort=semver)](https://github.com/oceanmodeling/schism-timings/releases/latest)
+[![Go version](https://img.shields.io/github/go-mod/go-version/oceanmodeling/schism-timings)](https://github.com/oceanmodeling/schism-timings/blob/master/go.mod)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+
 Command-line tool for printing SCHISM timing summaries from run directories or
 parent directories that contain them.
 
@@ -139,3 +144,8 @@ EXEC := $(EXEC)_TIMER2
 If `TIMER2` data is missing, empty, or incomplete, `schism-timings` still emits
 a partial row when the non-TIMER2 inputs are available. TIMER2-derived columns
 are reported as `NA` in table/CSV output and `null` in JSON output.
+
+## License
+
+`schism-timings` is licensed under the GNU General Public License v3.0. See
+[`LICENSE`](LICENSE) for details.
